@@ -71,7 +71,9 @@ SQL
 echo "      完成"
 
 echo "[3/5] 改 app/config/.env ..."
-cp "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"
+# 备份放 runtime/tmp（不改名成功就删掉，免得旧凭据在磁盘上留两份）
+BAK="$RT/tmp/env.bak.$(date +%Y%m%d%H%M%S)"
+cp "$ENV_FILE" "$BAK"
 sed -i '' \
   -e "s/^LEAN_DB_USER = .*/LEAN_DB_USER = '$NEW_USER'                          # Database username/" \
   -e "s/^LEAN_DB_PASSWORD = .*/LEAN_DB_PASSWORD = '$NEW_PASS'                              # Database password/" \
@@ -92,8 +94,10 @@ echo -n "      /calendar/showTodos -> $CODE"
 if [ "$CODE" = "200" ]; then
   echo "  ✓"
   "${ADMIN[@]}" -e "drop database if exists \`$OLD_DB\`; drop user if exists '$OLD_USER'@'localhost'; flush privileges;"
-  echo "旧库与旧账号已删除。"
+  rm -f "$BAK"
+  echo "旧库、旧账号、旧 .env 备份都已删除。"
 else
-  echo "  ✗ 新库不通，旧库和旧账号都留着，看 app/storage/logs/ 里的最新日志"
+  echo "  ✗ 新库不通，旧库和旧账号都留着；.env 的备份在 $BAK"
+  echo "    看 app/storage/logs/ 里的最新日志"
   exit 1
 fi

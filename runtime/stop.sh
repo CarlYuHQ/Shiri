@@ -3,6 +3,23 @@
 # 已注册 launchd 时用 bootout（否则 KeepAlive 会立刻把进程拉回来，看起来像停不掉）
 RT=/Users/carl/WorkBuddy/2026-11-06-12-16-22/runtime
 U=$(id -u)
+N=/opt/homebrew/opt/nginx/bin
+
+stop_nginx() {
+  if [ -f "$RT/run/nginx.pid" ] && $N/nginx -c "$RT/nginx.conf" -p "$RT" -s stop 2>/dev/null; then
+    echo "  nginx 已停止"
+    return
+  fi
+  # 兜底：pid 文件丢了或对不上时，按「谁占着 8080」来杀（只会命中本项目这一个）
+  local pids
+  pids=$(lsof -nP -tiTCP:8080 -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true
+    echo "  nginx 已强停（pid 文件对不上时的兜底）"
+  else
+    echo "  nginx 未在运行"
+  fi
+}
 
 if launchctl print "gui/$U/local.shiri.nginx" >/dev/null 2>&1; then
   echo "模式：launchd 托管，正在 bootout（会同时取消开机自启）"
@@ -13,7 +30,7 @@ if launchctl print "gui/$U/local.shiri.nginx" >/dev/null 2>&1; then
   echo "重新启用：bash $RT/install-autostart.sh"
 else
   echo "模式：手动进程，正在 kill"
-  [ -f "$RT/run/nginx.pid" ] && /opt/homebrew/opt/nginx/bin/nginx -c "$RT/nginx.conf" -p "$RT" -s stop 2>/dev/null && echo "  nginx 已停止"
+  stop_nginx
   [ -f "$RT/run/php-fpm.pid" ] && kill "$(cat "$RT/run/php-fpm.pid")" 2>/dev/null && echo "  php-fpm 已停止"
   [ -f "$RT/run/mariadb.pid" ] && kill "$(cat "$RT/run/mariadb.pid")" 2>/dev/null && echo "  mariadb 已停止"
 fi

@@ -15,8 +15,24 @@ N=/opt/homebrew/opt/nginx/bin
 LA="$HOME/Library/LaunchAgents"
 mkdir -p "$LA" "$RT/logs" "$RT/run"
 
+stop_nginx() {
+  if [ -f "$RT/run/nginx.pid" ] && $N/nginx -c "$RT/nginx.conf" -p "$RT" -s stop 2>/dev/null; then
+    echo "      nginx 已停"
+    return
+  fi
+  # 兜底：pid 文件丢了或对不上时，按「谁占着 8080」来杀（只会命中本项目这一个）
+  local pids
+  pids=$(lsof -nP -tiTCP:8080 -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true
+    echo "      nginx 已强停（pid 文件对不上时的兜底）"
+  else
+    echo "      nginx 未在运行"
+  fi
+}
+
 echo "[1/4] 停止当前手动启动的服务..."
-$N/nginx -c "$RT/nginx.conf" -p "$RT" -s stop 2>/dev/null && echo "      nginx 已停"
+stop_nginx
 [ -f "$RT/run/php-fpm.pid" ] && kill "$(cat "$RT/run/php-fpm.pid")" 2>/dev/null && echo "      php-fpm 已停"
 [ -f "$RT/run/mariadb.pid" ] && kill "$(cat "$RT/run/mariadb.pid")" 2>/dev/null && echo "      mariadb 已停"
 

@@ -41,7 +41,7 @@ else
     $P/sbin/php-fpm -y "$RT/php-fpm.conf" && echo "      已启动"
   fi
   echo "[3/3] nginx..."
-  if [ -f "$RT/run/nginx.pid" ] && kill -0 "$(cat "$RT/run/nginx.pid")" 2>/dev/null; then
+  if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then
     echo "      已在运行"
   else
     $N/nginx -c "$RT/nginx.conf" -p "$RT" && echo "      已启动"
