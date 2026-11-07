@@ -1,0 +1,40 @@
+<?php
+
+namespace Shiri\Domain\Calendar\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Domain\Calendar\Permissions\CalendarPermissions;
+use Shiri\Domain\Calendar\Services\Calendar as CalendarService;
+use Symfony\Component\HttpFoundation\Response;
+
+class ExternalCal extends Controller
+{
+    private CalendarService $calendarService;
+
+    /**
+     * Initializes dependencies.
+     */
+    public function init(CalendarService $calendarService): void
+    {
+        $this->calendarService = $calendarService;
+    }
+
+    /**
+     * Serves an external calendar's iCal content, with session-based caching.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(CalendarPermissions::VIEW)]
+    public function get(array $params): Response
+    {
+        $content = $this->calendarService->getCachedExternalCalendarContent(
+            (int) ($params['id'] ?? 0),
+            (int) session('userdata.id')
+        );
+
+        return new Response($content, 200, [
+            'Content-Type' => 'text/calendar; charset=utf-8',
+        ]);
+    }
+}

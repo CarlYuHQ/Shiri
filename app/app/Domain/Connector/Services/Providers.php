@@ -1,0 +1,46 @@
+<?php
+
+namespace Shiri\Domain\Connector\Services;
+
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Domain\Connector\Models\Provider;
+
+class Providers
+{
+    use DispatchesEvents;
+
+    private array $providers = [];
+
+    public function __construct()
+    {
+        $this->loadProviders();
+    }
+
+    public function loadProviders(): void
+    {
+
+        // Default Providers
+        $provider = app()->make(\Shiri\Domain\CsvImport\Services\CsvImport::class);
+        $this->providers[$provider->id] = $provider;
+
+        // providerId => provider
+        $this->providers = self::dispatch_filter('providerList', $this->providers);
+    }
+
+    public function getProviders(): array
+    {
+        return $this->providers;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    public function getProvider($providerId): object
+    {
+        if (isset($this->providers[$providerId])) {
+            return $this->providers[$providerId];
+        } else {
+            throw new \Exception('Provider does not exist');
+        }
+    }
+}

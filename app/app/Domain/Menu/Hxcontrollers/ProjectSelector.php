@@ -1,0 +1,53 @@
+<?php
+
+namespace Shiri\Domain\Menu\Hxcontrollers;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Shiri\Core\Controller\Frontcontroller as FrontcontrollerCore;
+use Shiri\Core\Controller\HtmxController;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Domain\Menu\Services\Menu;
+
+class ProjectSelector extends HtmxController
+{
+    use DispatchesEvents;
+
+    protected static string $view = 'menu::partials.projectSelector';
+
+    private Menu $menuService;
+
+    /**
+     * Controller constructor
+     */
+    public function init(Menu $menuService): void
+    {
+        $this->menuService = $menuService;
+    }
+
+    /**
+     * @throws BindingResolutionException
+     */
+    public function updateMenu(): void
+    {
+        $projectSelectFilter = [
+            'groupBy' => $_POST['groupBy'] ?? 'none',
+            'client' => (int) ($_POST['client'] ?? null),
+        ];
+
+        $userId = session()->exists('userdata') ? (int) session('userdata.id') : null;
+
+        $viewData = $this->menuService->getProjectSelectorViewData(
+            $userId,
+            $projectSelectFilter,
+            FrontcontrollerCore::getCurrentRoute(),
+            $this->incomingRequest->getRequestUri()
+        );
+
+        array_map([$this->tpl, 'assign'], array_keys($viewData), array_values($viewData));
+
+        $this->tpl->assign('module', FrontcontrollerCore::getModuleName());
+        $this->tpl->assign('action', FrontcontrollerCore::getActionName());
+    }
+
+    public function filter(): void {}
+}

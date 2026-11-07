@@ -1,0 +1,504 @@
+/*
+ * 桌面浮层：大月历（widget 布局专用）
+ * ---------------------------------------------------------------------------
+ * 这个页面只出现在「浮层模式」：窗口无边框、可拖动、整体半透明，贴在桌面
+ * （窗口层级低于普通窗口，被其他 App 挡住——像桌面小部件而不是悬浮窗）。
+ *
+ * 页面自身不画任何不透明背景——html/body 全透明，只留一张毛玻璃卡片，
+ * 卡片外的区域直接透出桌面。
+ *
+ * 三件事在这里控制：
+ *   1) 尺寸弹性 —— 字号 clamp() 跟视口高度缩放，月历 6 行 flex:1 平分剩余高度；
+ *   2) 不透明度 —— --rb-card-alpha 只作用于卡片底（不是窗口 alpha），
+ *      顶部那根细滑杆 / 菜单快捷键都写这个变量；
+ *   3) 时段主题 —— data-theme 取 dawn/day/dusk/night，
+ *      每套主题给一组「渐变底色 + 文字色」，由页面按当前钟点自动切换。
+ */
+
+:root {
+    /* 卡片玻璃底的不透明度（0.15–0.95），由滑杆 / 菜单写入 */
+    --rb-card-alpha: .66;
+}
+
+html,
+body {
+    background: transparent !important;
+    background-color: transparent !important;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+}
+
+body.rb-widget-body {
+    color: var(--lt-text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    /* 拖窗口时不要选中文字 */
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* ── 卡片本体 ─────────────────────────────────────────────────────────── */
+.rb-widget {
+    /* 默认（白天）配色，其余主题在下面覆盖 */
+    --rb-t1: 255, 255, 255;
+    --rb-t2: 250, 247, 242;
+    --rb-line: rgba(0, 0, 0, .07);
+    --rb-out: rgba(34, 32, 29, .22);
+    --rb-today-bg: #221c19;
+    --rb-today-fg: #fff;
+    --rb-chip-bg: rgba(192, 81, 47, .1);
+    --rb-chip-fg: #221c19;
+    --rb-thumb: #221c19;
+    --rb-track: rgba(0, 0, 0, .12);
+
+    -webkit-backdrop-filter: blur(26px) saturate(1.7);
+    backdrop-filter: blur(26px) saturate(1.7);
+    background-color: transparent;
+    /* 渐变底 + 可调 alpha：两段色都乘上 --rb-card-alpha */
+    background-image: linear-gradient(
+        158deg,
+        rgba(var(--rb-t1), var(--rb-card-alpha)) 0%,
+        rgba(var(--rb-t2), var(--rb-card-alpha)) 100%
+    );
+    border: 1px solid var(--rb-line);
+    border-radius: 22px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    padding: clamp(16px, 2.8vh, 30px) clamp(18px, 2.8vh, 34px) clamp(14px, 2.4vh, 24px);
+}
+
+/* ── 时段主题 ─────────────────────────────────────────────────────────────
+ * 只改「底色两端 + 前景色」。夜晚是深色，所以文字整体反相。
+ */
+.rb-widget[data-theme="dawn"] {
+    --rb-t1: 255, 246, 238;
+    --rb-t2: 245, 231, 242;
+    --rb-chip-bg: rgba(209, 116, 63, .12);
+    --lt-accent: #d1743f;
+}
+
+.rb-widget[data-theme="day"] {
+    --rb-t1: 255, 255, 255;
+    --rb-t2: 250, 247, 242;
+}
+
+.rb-widget[data-theme="noon"] {
+    /* 正午：顶上一点日光暖白，往下压成很浅的天光蓝，比「白天」更亮更透 */
+    --rb-t1: 255, 251, 233;
+    --rb-t2: 233, 243, 251;
+    --rb-chip-bg: rgba(198, 122, 43, .12);
+    --lt-accent: #c6792b;
+}
+
+.rb-widget[data-theme="dusk"] {
+    --rb-t1: 255, 236, 215;
+    --rb-t2: 231, 219, 237;
+    --rb-chip-bg: rgba(192, 73, 44, .12);
+    --lt-accent: #c0492c;
+}
+
+.rb-widget[data-theme="night"] {
+    --rb-t1: 46, 50, 67;
+    --rb-t2: 23, 25, 35;
+    --rb-line: rgba(255, 255, 255, .1);
+    --rb-out: rgba(241, 238, 234, .24);
+    --rb-today-bg: #f1eeea;
+    --rb-today-fg: #201e1c;
+    --rb-chip-bg: rgba(255, 138, 120, .16);
+    --rb-chip-fg: #f1eeea;
+    --rb-thumb: #f1eeea;
+    --rb-track: rgba(255, 255, 255, .22);
+    --lt-text: #f1eeea;
+    --lt-faint: rgba(241, 238, 234, .55);
+    --lt-accent: #ff9d7c;
+    --lt-neg: #ff8a78;
+}
+
+/* ── 头部：月份 + 逾期徽章 + 不透明度滑杆 ─────────────────────────────── */
+.rb-w-head {
+    align-items: center;
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: space-between;
+    margin-bottom: clamp(6px, 1.4vh, 12px);
+}
+
+.rb-w-month {
+    align-items: baseline;
+    display: flex;
+    gap: 2px;
+}
+
+.rb-w-mnum {
+    color: var(--lt-text);
+    font-size: clamp(18px, 2.9vh, 30px);
+    font-weight: 600;
+    letter-spacing: -.01em;
+    line-height: 1;
+}
+
+.rb-w-munit {
+    color: var(--lt-text);
+    font-size: clamp(12px, 2.1vh, 20px);
+    font-weight: 600;
+    margin: 0 1px;
+}
+
+.rb-w-year {
+    color: var(--lt-text);
+    font-size: clamp(18px, 2.9vh, 30px);
+    font-weight: 600;
+}
+
+/* 英文的「November 2026」是一整串，字号小一档，窄窗口下也不会把右侧按钮挤出去 */
+.rb-w-mtitle {
+    color: var(--lt-text);
+    font-size: clamp(15px, 2.4vh, 26px);
+    font-weight: 600;
+    letter-spacing: -.01em;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.rb-w-actions {
+    align-items: center;
+    display: flex;
+    gap: clamp(8px, 1.4vh, 16px);
+}
+
+.rb-w-badge {
+    background: rgba(192, 57, 43, .1);
+    border-radius: 5px;
+    color: var(--lt-neg, #c0392b);
+    font-size: clamp(11px, 1.6vh, 15px);
+    padding: 2px 6px;
+    white-space: nowrap;
+}
+
+.rb-w-icon {
+    background: none;
+    border: 0;
+    color: var(--lt-faint, #b4afa8);
+    cursor: pointer;
+    font: inherit;
+    font-size: clamp(13px, 1.9vh, 17px);
+    line-height: 1;
+    padding: 1px 2px;
+    text-decoration: none;
+}
+
+.rb-w-icon:hover {
+    color: var(--lt-text);
+}
+
+/* 时段标记：只是个很淡的小图标，说明当前是哪一档 */
+.rb-w-phase {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(12px, 1.7vh, 16px);
+    line-height: 1;
+    opacity: .8;
+}
+
+/* ── 不透明度：头部内联的细滑杆 ──────────────────────────────────────────
+ * 不弹面板、不占一整行 —— 就在月历右上角，一截 70pt 的细轨道。
+ */
+.rb-op-range {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+    height: 14px;
+    margin: 0;
+    width: clamp(52px, 7.2vh, 92px);
+}
+
+.rb-op-range::-webkit-slider-runnable-track {
+    background: var(--rb-track);
+    border-radius: 2px;
+    height: 2px;
+}
+
+.rb-op-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--rb-thumb);
+    border: 0;
+    border-radius: 50%;
+    height: 9px;
+    margin-top: -3.5px;
+    opacity: .7;
+    width: 9px;
+}
+
+.rb-op-range:hover::-webkit-slider-thumb,
+.rb-op-range:focus::-webkit-slider-thumb {
+    opacity: 1;
+}
+
+.rb-op-range:focus {
+    outline: none;
+}
+
+/* ── 月历网格：吃满剩余高度，行高平分 ─────────────────────────────────── */
+/* 下面「今天的事」按内容高度贴底（不参与撑高），所以这里 flex:1 全吃剩余空间；
+   事项多的时候 today 长高，cal 自动让位（保留 min-height:0 才允许被压）。 */
+.rb-w-cal {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.rb-w-dow {
+    color: var(--lt-faint, #b4afa8);
+    display: grid;
+    flex: 0 0 auto;
+    font-size: clamp(11px, 1.6vh, 15px);
+    gap: 2px;
+    /* minmax(0,1fr)：1fr 等价 minmax(auto,1fr)，格子里放不换行的日程条时
+       会把整列撑宽（各列宽度不一致）。必须给下限 0。 */
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    margin-bottom: 0;
+    padding-bottom: clamp(4px, .9vh, 9px);
+    text-align: center;
+}
+
+.rb-w-week {
+    border-top: 1px solid var(--rb-line);
+    display: grid;
+    flex: 1 1 0;
+    gap: 0;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    min-height: 0;
+}
+
+.rb-w-day {
+    align-items: stretch;
+    border-left: 1px solid var(--rb-line);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    justify-content: flex-start;
+    min-height: 0;
+    padding: clamp(4px, .7vh, 8px) clamp(6px, .9vh, 12px) clamp(2px, .4vh, 5px);
+}
+
+.rb-w-day:first-child {
+    border-left: 0;
+}
+
+/* 上下月日期淡出，但仍占位，保证网格对齐 */
+.rb-w-day.is-out .rb-w-daynum {
+    color: var(--rb-out);
+}
+
+.rb-w-daynum {
+    align-items: center;
+    align-self: flex-end;
+    border-radius: 50%;
+    color: var(--lt-text);
+    display: flex;
+    /* 参考 macOS 日历：数字只占格子一角，字号跟格子成比例，不抢戏 */
+    font-size: clamp(13px, 2.2vh, 20px);
+    font-variant-numeric: tabular-nums;
+    height: 1.75em;
+    justify-content: center;
+    line-height: 1;
+    width: 1.75em;
+}
+
+/* 今天：实心圆 */
+.rb-w-day.is-today .rb-w-daynum {
+    background: var(--lt-accent, #c0512f);
+    color: #fff;
+    font-weight: 600;
+}
+
+/* 有安排的日子：日期下方的小点（窄卡用，最多 3 个） */
+.rb-w-dots {
+    display: flex;
+    gap: 3px;
+    height: 5px;
+    margin-top: 1px;
+}
+
+.rb-w-dots i {
+    background: var(--lt-accent, #c0512f);
+    border-radius: 50%;
+    display: block;
+    height: 5px;
+    opacity: .75;
+    width: 5px;
+}
+
+.rb-w-day.is-today .rb-w-dots i {
+    opacity: 1;
+}
+
+/* ── 大卡：格子里的日程条 ─────────────────────────────────────────────────
+ * 默认（窄）只显示圆点、隐藏色条；窗口宽到 560pt 以上反过来 ——
+ * 卡大了以后一格有 100pt，光三个点太浪费，直接把当天的事读出来。
+ */
+.rb-w-chips {
+    box-sizing: border-box;
+    display: none;
+    margin-top: clamp(2px, .4vh, 5px);
+    padding: 0;
+    width: 100%;
+}
+
+.rb-w-chip {
+    background: var(--rb-chip-bg);
+    border-radius: 4px;
+    color: var(--rb-chip-fg);
+    display: block;
+    font-size: clamp(10px, 1.45vh, 14px);
+    font-style: normal;
+    line-height: 1.6;
+    margin-top: 3px;
+    overflow: hidden;
+    padding: 0 4px;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rb-w-chip b {
+    color: var(--lt-accent, #c0512f);
+    font-weight: 500;
+    margin-right: 4px;
+}
+
+.rb-w-chip.is-more {
+    background: transparent;
+    color: var(--lt-faint, #b4afa8);
+    padding-left: 2px;
+}
+
+@media (min-width: 560px) {
+    .rb-w-chips {
+        display: block;
+    }
+
+    .rb-w-dots {
+        display: none;
+    }
+}
+
+/* ── 今天的事 ─────────────────────────────────────────────────────────── */
+.rb-w-today {
+    border-top: 1px solid var(--rb-line);
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    margin-top: clamp(8px, 1.6vh, 14px);
+    max-height: 46%;
+    min-height: 0;
+    overflow: hidden;
+    padding-top: clamp(7px, 1.4vh, 12px);
+}
+
+.rb-w-today-head {
+    align-items: center;
+    color: var(--lt-faint, #b4afa8);
+    display: flex;
+    flex: 0 0 auto;
+    font-size: clamp(11px, 1.7vh, 15px);
+    justify-content: space-between;
+    letter-spacing: .04em;
+    margin-bottom: clamp(3px, .7vh, 7px);
+}
+
+.rb-w-plus {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(13px, 2vh, 19px);
+    line-height: 1;
+    padding: 0 3px;
+    text-decoration: none;
+}
+
+.rb-w-plus:hover {
+    color: var(--lt-text);
+}
+
+.rb-w-list {
+    margin: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.rb-widget .rb-row {
+    border-bottom: 0;
+    gap: clamp(6px, 1.1vh, 10px);
+    padding: clamp(4px, .95vh, 8px) 0;
+}
+
+.rb-widget .rb-row:hover {
+    background: transparent;
+}
+
+.rb-widget .rb-row-title {
+    color: var(--lt-text);
+    font-size: clamp(14px, 2.1vh, 19px);
+    line-height: 1.35;
+    /* 小卡里允许两行，长标题不至于被截成半句 */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    white-space: normal;
+    /* 小卡里标题只用来读，不做跳转 */
+    pointer-events: none;
+}
+
+.rb-widget .rb-row-due {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(11px, 1.7vh, 15px);
+}
+
+.rb-widget .rb-check {
+    border-color: var(--rb-thumb);
+    border-width: 1.2px;
+    height: clamp(14px, 2vh, 20px);
+    opacity: .65;
+    width: clamp(14px, 2vh, 20px);
+}
+
+.rb-widget .rb-row.is-done .rb-check::after {
+    font-size: clamp(9px, 1.3vh, 12px);
+    line-height: clamp(14px, 2vh, 20px);
+}
+
+/* 日历事件：不能勾选，用一个小小的强调色圆点区分 */
+.rb-row.is-event .rb-evdot {
+    background: var(--lt-accent, #c0512f);
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 5px;
+    margin: 0 5px;
+    opacity: .8;
+    width: 5px;
+}
+
+.rb-w-empty {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(12px, 1.8vh, 16px);
+    margin: clamp(4px, 1vh, 9px) 0 0;
+}
+
+.rb-w-more {
+    color: var(--lt-faint, #b4afa8);
+    display: block;
+    flex: 0 0 auto;
+    font-size: clamp(11px, 1.6vh, 15px);
+    padding-top: clamp(3px, .7vh, 7px);
+    text-decoration: none;
+}
+
+.rb-w-more:hover {
+    color: var(--lt-text);
+}

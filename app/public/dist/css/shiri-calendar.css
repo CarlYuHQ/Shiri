@@ -1,0 +1,164 @@
+/*
+ * 日历页排版微调（本机）
+ * ---------------------------------------------------------------------------
+ * 1) 日历撑满窗口高度，别在下面留一大块空白
+ * 2) 顶部工具条一行排开，不再折行把「今天 / ‹ / › / 导出」挤成两行
+ * 3) 条目（chip）的圆角、内边距、行高、日期数字、表头统一收拾一遍
+ *
+ * 由 app/Domain/Calendar/Templates/showMyCalendar.blade.php 的 @push('styles') 引入。
+ * 只在日历页生效，不影响其他页面。
+ */
+
+/* ── 0. 让日历本身宽一点：左栏 240px 只放两行图例，太浪费 ── */
+#my-calendar {
+    --box-padding: 12px;
+}
+
+/* 组件把 --lt-content-left-w 以内联样式写死在 #my-calendar 上，
+   所以在侧栏元素上覆盖宽度（选择器权重更高，不需要 !important） */
+#my-calendar .lt-content-side--left {
+    width: 184px;
+}
+
+/* ── 1. 高度 ─────────────────────────────────────────────────────────────
+   日历顶部距窗口顶 202px 左右，底部再留 ~10px，其余全部吃掉。
+   用视口单位而不是百分比：容器高度本身是内容撑开的，百分比会退化成 auto。 */
+#calendar.fc.fc-media-screen {
+    height: calc(100vh - 112px) !important;
+    min-height: 480px;
+}
+
+/* 极简布局下侧栏与页头都已移除，内容区直接顶到窗口底部 */
+.maincontent .maincontentinner.lt-content {
+    min-height: calc(100vh - 66px) !important;
+}
+
+/* ── 2. 工具条 ─────────────────────────────────────────────────────────── */
+.calendarToolbar {
+    flex-wrap: nowrap !important;
+    row-gap: 0 !important;
+}
+
+.calendarToolbar > .tw-flex-1 {
+    min-width: 0;
+}
+
+.calendarToolbar #my-select {
+    width: 96px;
+}
+
+.calendarToolbar .btn,
+.calendarToolbar a.btn {
+    white-space: nowrap;
+}
+
+/* ── 3. 条目（chip） ───────────────────────────────────────────────────── */
+#calendar .fc-daygrid-event {
+    border-width: 0 !important;
+    border-radius: 6px;
+    padding: 2px 6px !important;
+    font-size: 12px;
+    line-height: 17px;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, .05);
+}
+
+#calendar .fc-daygrid-event-harness {
+    margin-top: 2px;
+}
+
+#calendar .fc-daygrid-event .fc-event-main {
+    padding: 0;
+}
+
+#calendar .fc-daygrid-event .fc-event-main-frame {
+    padding: 0;
+    gap: 4px;
+}
+
+/* 只有时间的条目（圆点样式）：用条目自身的颜色兑一点底色，
+   看起来才像一条"内容"而不是一行灰字 */
+#calendar .fc-daygrid-dot-event {
+    border-radius: 6px;
+    padding: 2px 6px !important;
+    gap: 4px;
+    background: color-mix(in srgb, currentColor 9%, transparent);
+}
+
+#calendar .fc-daygrid-dot-event:hover {
+    background: color-mix(in srgb, currentColor 17%, transparent);
+}
+
+#calendar .fc-daygrid-event-dot {
+    margin-right: 1px;
+    border-width: 3.5px;
+    flex: 0 0 auto;
+}
+
+/* 月视图一格里只有 ~110px，"07:59 下午" 会占掉一半、标题全被挤没。
+   时间在日/周视图里照常显示（那些视图用的是 fc-timegrid-event）。 */
+#calendar .fc-daygrid-event .fc-event-time {
+    display: none;
+}
+
+#calendar .fc-event-time {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    opacity: .8;
+    flex: 0 0 auto;
+}
+
+#calendar .fc-event-title {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 有底色的整块条目 */
+#calendar .fc-daygrid-block-event {
+    min-height: 22px;
+    padding: 3px 7px !important;
+    align-items: center;
+}
+
+#calendar .fc-daygrid-block-event .fc-event-main-frame {
+    align-items: center;
+    width: 100%;
+}
+
+/* 条目上的删除按钮（shiri-quickdelete.js）稍微内收一点，别压住圆角 */
+#calendar .fc-event .lt-qd {
+    top: 3px;
+    right: 3px;
+}
+
+/* ── 4. 表头与日期数字 ─────────────────────────────────────────────────── */
+#calendar .fc-col-header-cell-cushion {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    color: var(--text-muted, #6b7280);
+    padding: 8px 0;
+    text-decoration: none;
+}
+
+#calendar .fc-daygrid-day-number {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 8px 2px;
+    opacity: .8;
+    text-decoration: none;
+}
+
+#calendar .fc-day-today .fc-daygrid-day-number {
+    opacity: 1;
+    color: var(--accent1, #a14b2c);
+}
+
+#calendar .fc-daygrid-day.fc-day-today {
+    background: rgba(0, 0, 0, .022);
+}
+
+/* 上下月的日期淡一些，不再和本月抢注意力 */
+#calendar .fc-day-other .fc-daygrid-day-number {
+    opacity: .35;
+}

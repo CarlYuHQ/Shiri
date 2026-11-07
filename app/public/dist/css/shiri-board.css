@@ -1,0 +1,698 @@
+/*
+ * 「拾日」待办清单 / 统计 / 桌面小卡共用样式
+ * ---------------------------------------------------------------------------
+ * 与 minimal.css 同一套语汇：无阴影、无渐变、一档发丝线、一个强调色。
+ * 桌面小卡（widget 布局）不加载 minimal.css，所以这里自带变量与基础样式。
+ */
+
+:root {
+    --lt-bg: #ffffff;
+    --lt-border: #ecebe8;
+    --lt-border-strong: #dedbd6;
+    --lt-text: #22201d;
+    --lt-muted: #8b8781;
+    --lt-faint: #b4afa8;
+    --lt-hover: #f4f1ee;
+    --lt-neg: #c0392b;
+    --lt-accent: #c0512f;
+}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────────── */
+.rb-page {
+    margin: 0 auto;
+    max-width: 660px;
+    padding: 30px 22px 90px;
+}
+
+.rb-page-head {
+    align-items: flex-end;
+    display: flex;
+    gap: 16px;
+    justify-content: space-between;
+    margin-bottom: 22px;
+}
+
+.rb-page-title {
+    color: var(--lt-text);
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    margin: 0 0 3px;
+}
+
+.rb-page-sub {
+    color: var(--lt-muted);
+    font-size: 12.5px;
+    margin: 0;
+}
+
+.rb-page-sub .rb-dot {
+    margin: 0 6px;
+    color: var(--lt-faint);
+}
+
+.rb-neg {
+    color: var(--lt-neg);
+}
+
+.rb-muted {
+    color: var(--lt-muted);
+}
+
+/* ── 筛选：只有字的 tab ───────────────────────────────────────────────── */
+.rb-tabs {
+    display: flex;
+    gap: 2px;
+}
+
+.rb-tab {
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    color: var(--lt-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 5px 11px;
+}
+
+.rb-tab:hover {
+    background: var(--lt-hover);
+    color: var(--lt-text);
+}
+
+.rb-tab.is-active {
+    background: var(--lt-text);
+    color: #fff;
+}
+
+/* ── 一行快速录入 ─────────────────────────────────────────────────────── */
+.rb-quickadd {
+    align-items: center;
+    border-bottom: 1px solid var(--lt-border);
+    display: flex;
+    gap: 8px;
+    margin-bottom: 26px;
+    padding: 4px 0 9px;
+}
+
+.rb-quickadd-text {
+    background: transparent;
+    border: 0;
+    color: var(--lt-text);
+    flex: 1 1 auto;
+    font: inherit;
+    font-size: 13.5px;
+    min-width: 0;
+    outline: none;
+    padding: 4px 2px;
+}
+
+.rb-quickadd-text::placeholder {
+    color: var(--lt-faint);
+}
+
+/* WebKit 的日期输入自带灰底、描边和固有的 256px 宽度（整站 CSS 里 input[type=date]
+   的规则也更具体），这里用类 + type 叠加选择器并加 !important 整套压平，
+   只留一行可点的日期文字。 */
+input.rb-quickadd-date[type="date"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent !important;
+    border: 0 !important;
+    color: var(--lt-muted);
+    flex: 0 0 auto;
+    font: inherit;
+    font-size: 12px;
+    height: auto;
+    line-height: 1.5;
+    outline: none;
+    padding: 2px 0 !important;
+    width: 116px !important;
+}
+
+input.rb-quickadd-date[type="date"]::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: .45;
+    padding: 0;
+}
+
+input.rb-quickadd-date[type="date"]::-webkit-datetime-edit {
+    padding: 0;
+}
+
+.rb-quickadd-btn {
+    background: transparent;
+    border: 1px solid var(--lt-border-strong);
+    border-radius: 7px;
+    color: var(--lt-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 12px;
+    white-space: nowrap;
+}
+
+.rb-quickadd-btn:hover {
+    background: var(--lt-hover);
+}
+
+/* ── 分组 ─────────────────────────────────────────────────────────────── */
+.rb-group {
+    margin-bottom: 22px;
+}
+
+.rb-group-head {
+    align-items: baseline;
+    color: var(--lt-muted);
+    display: flex;
+    font-size: 11.5px;
+    font-weight: 600;
+    gap: 7px;
+    letter-spacing: .1em;
+    margin: 0 0 4px;
+}
+
+.rb-group-count {
+    color: var(--lt-faint);
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+.rb-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+/* ── 一行待办 ─────────────────────────────────────────────────────────── */
+.rb-row {
+    align-items: center;
+    border-bottom: 1px solid #f5f3f0;
+    display: flex;
+    gap: 10px;
+    padding: 9px 2px;
+}
+
+.rb-row:hover {
+    background: #fbfaf9;
+}
+
+/* 勾选圈 */
+.rb-check {
+    background: transparent;
+    border: 1.5px solid var(--lt-border-strong);
+    border-radius: 50%;
+    cursor: pointer;
+    flex: 0 0 auto;
+    height: 16px;
+    margin: 0;
+    padding: 0;
+    position: relative;
+    transition: background .1s ease, border-color .1s ease;
+    width: 16px;
+}
+
+.rb-check:hover {
+    border-color: var(--lt-text);
+}
+
+.rb-row.is-done .rb-check {
+    background: var(--lt-text);
+    border-color: var(--lt-text);
+}
+
+.rb-row.is-done .rb-check::after {
+    color: #fff;
+    content: "✓";
+    font-size: 10px;
+    font-weight: 700;
+    left: 0;
+    line-height: 16px;
+    position: absolute;
+    text-align: center;
+    top: 0;
+    width: 100%;
+}
+
+/* 正在保存：半透明，避免重复点击 */
+.rb-row.is-busy {
+    opacity: .45;
+    pointer-events: none;
+}
+
+.rb-row-title {
+    color: var(--lt-text);
+    flex: 1 1 auto;
+    font-size: 13.5px;
+    line-height: 1.5;
+    min-width: 0;
+    overflow: hidden;
+    text-decoration: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rb-row-title:hover {
+    text-decoration: underline;
+    text-decoration-color: var(--lt-border-strong);
+}
+
+.rb-row.is-done .rb-row-title {
+    color: var(--lt-faint);
+    text-decoration: line-through;
+}
+
+.rb-row-due {
+    color: var(--lt-muted);
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.rb-row.is-overdue .rb-row-due {
+    color: var(--lt-neg);
+}
+
+.rb-empty {
+    color: var(--lt-faint);
+    font-size: 13px;
+    padding: 20px 2px;
+}
+
+/* 分组被筛空时整块隐藏 */
+.rb-group.is-hidden,
+.rb-row.is-hidden {
+    display: none;
+}
+
+/* ── 统计 ─────────────────────────────────────────────────────────────── */
+.rb-metrics {
+    border-bottom: 1px solid var(--lt-border);
+    border-top: 1px solid var(--lt-border);
+    display: grid;
+    gap: 0;
+    grid-template-columns: repeat(3, 1fr);
+    margin-bottom: 26px;
+}
+
+.rb-metric {
+    border-right: 1px solid var(--lt-border);
+    padding: 16px 4px;
+    text-align: center;
+}
+
+.rb-metric:nth-child(3n) {
+    border-right: 0;
+}
+
+.rb-metric:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--lt-border);
+}
+
+.rb-metric-num {
+    color: var(--lt-text);
+    display: block;
+    font-size: 26px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.01em;
+    line-height: 1.2;
+}
+
+.rb-metric.is-neg .rb-metric-num {
+    color: var(--lt-neg);
+}
+
+.rb-metric-label {
+    color: var(--lt-muted);
+    display: block;
+    font-size: 11.5px;
+    margin-top: 4px;
+}
+
+.rb-card {
+    margin-bottom: 26px;
+}
+
+.rb-card-head {
+    color: var(--lt-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .1em;
+    margin: 0 0 14px;
+}
+
+/* 近 7 天：纯 div 柱状图 */
+.rb-bars {
+    display: flex;
+    gap: 10px;
+    height: 132px;
+}
+
+.rb-bar-col {
+    align-items: center;
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 6px;
+    height: 100%;
+    min-width: 0;
+}
+
+.rb-bar-val {
+    color: var(--lt-muted);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    height: 12px;
+    line-height: 12px;
+}
+
+.rb-bar-track {
+    align-items: flex-end;
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+}
+
+.rb-bar {
+    background: var(--lt-border-strong);
+    border-radius: 4px 4px 1px 1px;
+    display: block;
+    /* 0 件的那天留一条 2px 的底线，否则图表看起来是空白的 */
+    margin: 0 auto;
+    max-width: 36px;
+    min-height: 2px;
+    width: 100%;
+}
+
+.rb-bar.is-zero {
+    background: var(--lt-border);
+}
+
+.rb-bar-col.is-today .rb-bar {
+    background: var(--lt-accent);
+}
+
+.rb-bar-col.is-today .rb-bar-label {
+    color: var(--lt-text);
+    font-weight: 600;
+}
+
+.rb-bar-label {
+    color: var(--lt-faint);
+    font-size: 11px;
+    line-height: 1;
+}
+
+/* 分布表 */
+.rb-kv {
+    display: grid;
+    gap: 0 22px;
+    grid-template-columns: repeat(2, 1fr);
+    margin: 0;
+}
+
+.rb-kv > div {
+    border-bottom: 1px solid #f5f3f0;
+    display: flex;
+    justify-content: space-between;
+    padding: 9px 0;
+}
+
+.rb-kv dt {
+    color: var(--lt-muted);
+    font-size: 12.5px;
+    font-weight: 400;
+}
+
+.rb-kv dd {
+    color: var(--lt-text);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+}
+
+.rb-hint {
+    color: var(--lt-muted);
+    font-size: 12.5px;
+    margin: 14px 0 0;
+}
+
+.rb-hint a {
+    color: var(--lt-text);
+    text-decoration: underline;
+    text-decoration-color: var(--lt-border-strong);
+}
+
+.rb-footnote {
+    border-top: 1px solid var(--lt-border);
+    color: var(--lt-faint);
+    font-size: 11.5px;
+    line-height: 1.7;
+    margin: 0;
+    padding-top: 14px;
+}
+
+/* ── 例行计划页 ─────────────────────────────────────────────────────────── */
+.rb-plan-form {
+    border-bottom: 1px solid var(--lt-border);
+    margin-bottom: 18px;
+    padding-bottom: 16px;
+}
+
+.rb-plan-title {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--lt-border);
+    border-radius: 0;
+    box-sizing: border-box;
+    color: var(--lt-text);
+    font-size: 15px;
+    margin-bottom: 12px;
+    padding: 8px 2px;
+    width: 100%;
+}
+
+.rb-plan-title:focus {
+    border-bottom-color: var(--lt-text);
+    outline: none;
+}
+
+.rb-plan-line {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+}
+
+.rb-plan-field {
+    align-items: center;
+    display: flex;
+    gap: 6px;
+}
+
+.rb-plan-field > span {
+    color: var(--lt-faint);
+    font-size: 12px;
+}
+
+.rb-plan-field select,
+.rb-plan-field input {
+    background: transparent;
+    border: 1px solid var(--lt-border);
+    border-radius: 6px;
+    color: var(--lt-text);
+    font: inherit;
+    font-size: 13px;
+    padding: 4px 6px;
+    width: 76px;
+}
+
+.rb-plan-field input.rb-plan-time {
+    text-align: center;
+    width: 96px;
+}
+
+.rb-plan-field input.rb-plan-start {
+    width: 124px;
+}
+
+.rb-plan-field input::placeholder {
+    color: var(--lt-faint);
+}
+
+.rb-plan-days {
+    display: flex;
+    gap: 4px;
+}
+
+.rb-plan-day {
+    background: transparent;
+    border: 1px solid var(--lt-border);
+    border-radius: 50%;
+    color: var(--lt-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    height: 26px;
+    line-height: 1;
+    padding: 0;
+    width: 26px;
+}
+
+.rb-plan-day.is-on {
+    background: var(--lt-text);
+    border-color: var(--lt-text);
+    color: #fff;
+}
+
+.rb-plan-hint {
+    color: var(--lt-faint);
+    font-size: 12px;
+    margin: 10px 0 0;
+}
+
+.rb-plan-hint.is-warn {
+    color: var(--lt-neg);
+}
+
+.rb-plan-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.rb-plan-item {
+    align-items: center;
+    border-bottom: 1px solid var(--lt-border);
+    display: flex;
+    gap: 10px;
+    padding: 11px 0;
+}
+
+.rb-plan-item.is-off {
+    opacity: .45;
+}
+
+.rb-plan-dot {
+    background: var(--lt-accent);
+    border-radius: 50%;
+    flex: 0 0 auto;
+    height: 6px;
+    width: 6px;
+}
+
+.rb-plan-item-title {
+    color: var(--lt-text);
+    flex: 1 1 auto;
+    font-size: 14px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rb-plan-item-when {
+    color: var(--lt-faint);
+    flex: 0 0 auto;
+    font-size: 12px;
+}
+
+.rb-plan-toggle,
+.rb-plan-del {
+    background: transparent;
+    border: 0;
+    color: var(--lt-faint);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    padding: 2px 4px;
+}
+
+.rb-plan-toggle:hover,
+.rb-plan-del:hover {
+    color: var(--lt-text);
+}
+
+.rb-plan-del {
+    font-size: 15px;
+    line-height: 1;
+}
+
+/* ── 设置页 ─────────────────────────────────────────────────────────────── */
+.rb-set-status {
+    color: var(--lt-faint);
+    font-size: 12px;
+    min-height: 1em;
+}
+
+.rb-set-block {
+    border-top: 1px solid var(--lt-border);
+    padding: 18px 0 4px;
+}
+
+.rb-set-block:first-of-type {
+    border-top: 0;
+}
+
+.rb-set-head {
+    color: var(--lt-text);
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 4px;
+}
+
+.rb-set-block .rb-hint {
+    margin: 0 0 10px;
+}
+
+.rb-set-opts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.rb-set-opt {
+    background: transparent;
+    border: 1px solid var(--lt-border);
+    border-radius: 999px;
+    color: var(--lt-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 14px;
+    transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+
+.rb-set-opt:hover {
+    border-color: var(--lt-text);
+    color: var(--lt-text);
+}
+
+.rb-set-opt.is-on {
+    background: var(--lt-text);
+    border-color: var(--lt-text);
+    color: #fff;
+}
+
+.rb-set-row {
+    align-items: center;
+    display: flex;
+    gap: 12px;
+}
+
+.rb-set-row .rb-op-range {
+    flex: 0 0 auto;
+    height: 20px;
+    width: 220px;
+}
+
+.rb-set-val {
+    color: var(--lt-muted);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    min-width: 3.4em;
+}

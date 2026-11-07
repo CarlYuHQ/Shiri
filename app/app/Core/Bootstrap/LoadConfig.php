@@ -1,0 +1,208 @@
+<?php
+
+namespace Shiri\Core\Bootstrap;
+
+use Illuminate\Config\Repository;
+use Illuminate\Contracts\Config\Repository as RepositoryContract;
+use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Foundation\Bootstrap\LoadConfiguration;
+use Illuminate\Http\Request;
+use Shiri\Core\Configuration\Attributes\LaravelConfig;
+use Shiri\Core\Configuration\DefaultConfig;
+use Shiri\Core\Configuration\Environment;
+use Shiri\Core\Http\IncomingRequest;
+use Shiri\Core\Middleware\TrustProxies;
+
+class LoadConfig extends LoadConfiguration
+{
+    protected $ignoreFiles = [
+        'configuration.sample.php',
+        'configuration.php',
+    ];
+
+    protected $headers = IncomingRequest::HEADER_X_FORWARDED_FOR |
+        IncomingRequest::HEADER_X_FORWARDED_HOST |
+        IncomingRequest::HEADER_X_FORWARDED_PORT |
+        IncomingRequest::HEADER_X_FORWARDED_PROTO |
+        IncomingRequest::HEADER_X_FORWARDED_AWS_ELB;
+
+    /**
+     * Bootstrap the application.
+     *
+     * This method initializes the application by loading the configuration files and
+     * setting up the environment.
+     *
+     * @param  Application  $app  The application instance.
+     * @return void
+     */
+    public function bootstrap(Application $app)
+    {
+        $items = [];
+        $loadedFromCache = false;
+
+        // First we will see if we have a cache configuration file. If we do, we'll load
+        // the configuration items from that file so that it is very quick. Otherwise
+        // we will need to spin through every configuration file and load them all.
+        if (file_exists($cached = $app->getCachedConfigPath())) {
+            $items = require $cached;
+
+            $loadedFromCache = true;
+        }
+
+        $app->instance('config_loaded_from_cache', $loadedFromCache);
+
+        // Next we will spin through all of the configuration files in the configuration
+        // directory and load each one into the repository. This will make all of the
+        // options available to the developer for use in various parts of this app.
+        $app->instance('config', $config = new Environment($items));
+
+        if (! $loadedFromCache) {
+            $this->loadConfigurationFiles($app, $config);
+
+            // Now extend config with laravel configs if they exist
+            $app->extend('config', function (Repository $config) use ($app) {
+
+                // $shiriConfig = $app->make(Environment::class);
+
+                // Add all laravel configs to shiri config
+                //                foreach ($laravelConfig->all() as $key => $value) {
+                //                    $shiriConfig->set($key, $value);
+                //                }
+
+                // At this point we have the shiri config and loaded laravel configs
+                // Re-aranging and setting some of the laravel defaults that were not set
+                // as part of the file loader. Laravel config vars were already added.
+                $finalConfig = $this->mapShiri2LaravelConfig($config);
+
+                // Additional adjustments
+                $finalConfig->set('APP_DEBUG', $finalConfig->get('debug') ? true : false);
+
+                if (preg_match('/.+\/$/', $finalConfig->get('appUrl'))) {
+                    $url = rtrim($finalConfig->get('appUrl'), '/');
+                    $finalConfig->set('appUrl', $url);
+                    $finalConfig->set('app.url', $url);
+                }
+
+                $this->setBaseConstants($finalConfig, $app);
+
+                if ($finalConfig->get('app.url') == '') {
+                    $url = defined('BASE_URL') ? BASE_URL : 'http://localhost';
+                    $finalConfig->set('app.url', $url);
+                }
+
+                // Handle trailing slashes
+                return $finalConfig;
+            });
+        }
+
+        // Need to run this in case config is coming from cache
+        $this->setBaseConstants($app['config'], $app);
+
+        $config = $app['config'];
+
+        $app['events']->dispatch('config_initialized');
+
+        // Finally, we will set the application's environment based on the configuration
+        // values that were loaded. We will pass a callback which will be used to get
+        // the environment in a web context where an "--env" switch is not present.
+        $app->detectEnvironment(fn () => $config->get('app.env', 'production'));
+
+        // The PHP process always runs in UTC: every DB datetime is UTC by convention, and date()/
+        // now()/strtotime() must agree with that. app.timezone (LEAN_DEFAULT_TIMEZONE) is the
+        // default *user* timezone, applied explicitly via DateTimeHelper/format(), never to the
+        // process. Using it here made cron, queue and logged-out requests write local time.
+        date_default_timezone_set('UTC');
+
+        mb_internal_encoding('UTF-8');
+
+    }
+
+    /**
+     * Sets the URL constants for the application.
+     *
+     * If the BASE_URL constant is not defined, it will be set based on the value of $appUrl parameter.
+     * If $appUrl is empty or not provided, it will be set using the getSchemeAndHttpHost method of the class.
+     *
+     * The APP_URL environment variable will be set to the value of $appUrl.
+     *
+     * If the CURRENT_URL constant is not defined, it will be set by appending the getRequestUri method result to the BASE_URL.
+     *
+     * @param  mixed  $config  The configuration object providing the appUrl value.
+     * @param  mixed  $app  The application instance used to resolve the request.
+     * @return void
+     */
+    public function setBaseConstants($config, $app)
+    {
+
+        $appUrl = $config->get('appUrl');
+
+        // Set trusted proxies as early as possible to ensure schema is identified correctly
+        Request::setTrustedProxies(TrustProxies::resolveTrustedProxies($config->trustedProxies ?? ''), $this->headers);
+
+        if (! defined('BASE_URL')) {
+            if (isset($appUrl) && ! empty($appUrl)) {
+                define('BASE_URL', $appUrl);
+            } else {
+                $appUrl = ! empty($app['request']) ? $app['request']->getSchemeAndHttpHost() : 'http://localhost';
+                define('BASE_URL', $appUrl);
+            }
+        }
+
+        putenv('APP_URL='.$appUrl);
+
+        if (! defined('CURRENT_URL')) {
+            define('CURRENT_URL', ! empty($app['request']) ? BASE_URL.$app['request']->getRequestUri() : 'http://localhost');
+        }
+
+    }
+
+    /**
+     * Load the configuration files.
+     *
+     * This method loads the Laravel configuration files and sets them into the given repository.
+     *
+     * @param  Application  $app  The application instance.
+     * @param  RepositoryContract  $repository  The repository where the configuration files will be set.
+     * @return void
+     */
+    protected function loadConfigurationFiles(Application $app, RepositoryContract $repository)
+    {
+        $laravelConfig = require APP_ROOT.'/app/Core/Configuration/laravelConfig.php';
+        foreach ($laravelConfig as $key => $configArea) {
+            $repository->set($key, $configArea);
+        }
+    }
+
+    /**
+     * Maps Shiri configuration options to Laravel configuration options.
+     *
+     * @param  mixed  $config  The Laravel configuration object to map to.
+     * @return mixed The updated Shiri configuration object with mapped values.
+     */
+    protected function mapShiri2LaravelConfig($config)
+    {
+
+        $reflectionClass = new \ReflectionClass(DefaultConfig::class);
+        $properties = $reflectionClass->getProperties();
+
+        // Parsing through all the shiri config options.
+        // Default tracks a mapping via attributes
+        foreach ($properties as $configVar) {
+            $attributes = $configVar->getAttributes(LaravelConfig::class);
+
+            if (isset($attributes[0])) {
+
+                $laravelConfigKey = $attributes[0]->newInstance()->config;
+                $defaultConfigkey = $configVar->name;
+
+                // set laravel config.
+                // Shiri env file has priority and can override previously defined laravel configs
+                $config->set($laravelConfigKey, $config->get($defaultConfigkey));
+            }
+        }
+
+        return $config;
+    }
+
+    public function configValidation() {}
+}

@@ -1,0 +1,86 @@
+<?php
+
+namespace Shiri\Domain\Oidc\Controllers;
+
+use GuzzleHttp\Exception\GuzzleException;
+use Illuminate\Support\Facades\Log;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Domain\Oidc\Services\Oidc as OidcService;
+use Shiri\Domain\Plugins\Services\Plugins;
+use Symfony\Component\HttpFoundation\Response;
+
+class Login extends Controller
+{
+    private OidcService $oidc;
+
+    private Plugins $plugins;
+
+    /**
+     * Initializes dependencies.
+     *
+     * @throws GuzzleException
+     */
+    public function init(OidcService $oidc, Plugins $plugins): void
+    {
+        $this->oidc = $oidc;
+        $this->plugins = $plugins;
+    }
+
+    /**
+     * Redirects to the OIDC provider login page.
+     *
+     * @param  array  $params  Request parameters
+     */
+    public function get(array $params): Response
+    {
+        try {
+            // Mobile-brokered SSO: the app passes ?mobile=1&redirect_uri=<app scheme>
+            // + a PKCE code_challenge, so the callback mints a token + one-time
+            // code (bound to that challenge) and redirects back to the app instead
+            // of establishing a web session. The service validates the redirect
+            // scheme; a non-mobile web login passes none of these.
+            $mobile = ! empty($params['mobile']);
+            $redirectUri = is_string($params['redirect_uri'] ?? null) ? $params['redirect_uri'] : '';
+            $codeChallenge = is_string($params['code_challenge'] ?? null) ? $params['code_challenge'] : '';
+
+            // The mobile-brokered branch is an AdvancedAuth capability. Without the
+            // plugin, ignore the mobile params and fall back to normal web login —
+            // the mint endpoint refuses too, so no mobile session can be brokered.
+            if ($mobile && ! $this->plugins->isEnabled('AdvancedAuth')) {
+                return Frontcontroller::redirect(BASE_URL.'/auth/login');
+            }
+
+            // Mobile flow requires a PKCE challenge — otherwise the callback
+            // would mint a code whose exchange can never succeed (pkceMatches
+            // rejects an empty challenge). Fail loudly at the front door.
+            if ($mobile && $codeChallenge === '') {
+                $this->tpl->setNotification($this->language->__('notification.oidc_mobile_pkce_required'), 'error');
+
+                return Frontcontroller::redirect(BASE_URL.'/auth/login');
+            }
+
+            // A PKCE S256 challenge is base64url(sha256(verifier)) — the
+            // base64url charset, 43–128 chars (RFC 7636). Reject a present-but-
+            // malformed value so a crafted request can't persist junk into the
+            // code store and to enforce the intended mobile contract.
+            if ($codeChallenge !== '' && ! preg_match('/^[A-Za-z0-9\-_]{43,128}$/', $codeChallenge)) {
+                $this->tpl->setNotification($this->language->__('notification.oidc_invalid_pkce'), 'error');
+
+                return Frontcontroller::redirect(BASE_URL.'/auth/login');
+            }
+
+            $loginUrl = $this->oidc->buildLoginUrl($mobile, $redirectUri, $codeChallenge);
+
+            if ($loginUrl) {
+                return Frontcontroller::redirect($loginUrl, 302);
+            }
+        } catch (\Throwable $e) {
+            Log::error($e);
+        }
+
+        $this->tpl->setNotification($this->language->__('notification.oidc_auth_url_not_found'), 'error');
+
+        return Frontcontroller::redirect(BASE_URL.'/auth/login');
+    }
+}

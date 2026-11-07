@@ -1,0 +1,52 @@
+<?php
+
+namespace Shiri\Domain\Projects\Controllers;
+
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+
+class ChangeCurrentProject extends Controller
+{
+    private ProjectService $projectService;
+
+    public function init(ProjectService $projectService): void
+    {
+        $this->projectService = $projectService;
+    }
+
+    /**
+     * get - handle get requests
+     */
+    public function get($params)
+    {
+        $id = (int) ($params['id'] ?? 0);
+
+        if (
+            ! isset($params['id']) ||
+            ! $this->projectService->isUserAssignedToProject(session('userdata.id'), $id) ||
+            ! $project = $this->projectService->getProject($id)
+        ) {
+            return Frontcontroller::redirect(BASE_URL.'/errors/error404');
+        }
+
+        $this->projectService->changeCurrentSessionProject($id);
+
+        $defaultURL = '/dashboard/show';
+        $redirectFilter = self::dispatch_filter('defaultProjectUrl', $defaultURL, $project);
+
+        return Frontcontroller::redirect(BASE_URL.$redirectFilter);
+    }
+
+    /**
+     * post - handle post requests (via login for example) and redirects to get
+     */
+    public function post($params)
+    {
+        if (isset($_GET['id'])) {
+            $id = filter_var($_GET['id'], FILTER_SANITIZE_NUMBER_INT);
+
+            return Frontcontroller::redirect(BASE_URL.'/projects/changeCurrentProject/'.$id);
+        }
+    }
+}

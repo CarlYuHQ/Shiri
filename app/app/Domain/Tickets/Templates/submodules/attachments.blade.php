@@ -1,0 +1,78 @@
+<div class="mediamgr_category">
+
+    <form action='{{ BASE_URL }}/tickets/showTicket/{{ $ticket->id }}#files' method='POST' enctype="multipart/form-data" class="formModal">
+        <div class="par f-left" style="margin-right: 15px;">
+        <input type="hidden" name="upload" value="1" />
+         <div class='fileupload fileupload-new' data-provides='fileupload'>
+             <input type="hidden" />
+            <div class="input-append">
+                <div class="uneditable-input span3">
+                    <i class="fa-file fileupload-exists"></i><span class="fileupload-preview"></span>
+                </div>
+                <span class="btn btn-file">
+                    <span class="fileupload-new">{!! __('buttons.select_file') !!}</span>
+                    <span class='fileupload-exists'>{!! __('buttons.change') !!}</span>
+                    <input type='file' name='file' />
+                </span>
+                <a href='#' class='btn fileupload-exists' data-dismiss='fileupload'>{!! __('buttons.remove') !!}</a>
+            </div>
+         </div>
+       </div>
+
+       <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.upload')" name="upload" />
+
+    </form>
+
+    <div class="clear"></div>
+</div>
+
+<div class="mediamgr_content">
+
+    <ul id='medialist' class='listfile'>
+    @foreach ($files as $file)
+        <x-global::elements.card as="li" compact class="{{ $file['moduleId'] }}">
+            <x-global::actions.dropdown class="dropright" style="float:right;">
+                <li class="nav-header">{!! __('subtitles.file') !!}</li>
+                <li><a href="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}" target="_blank">{!! __('links.download') !!}</a></li>
+
+                @if ($login::userIsAtLeast($roles::$editor))
+                    <li><a href="javascript:void(0);" data-post-url="{{ BASE_URL }}/tickets/showTicket/{{ $ticket->id }}" data-post-field="delFile" data-post-value="{{ $file['id'] }}" class="delete"><i class="fa fa-trash"></i> {!! __('links.delete') !!}</a></li>
+                @endif
+
+
+            </x-global::actions.dropdown>
+
+
+              <a class="cboxElement" href="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}" target="_blank">
+                  @if (in_array(strtolower($file['extension']), $imgExtensions))
+                      <img style='max-height: 50px; max-width: 70px;' src="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}" alt="" />
+                  @else
+                      <div style="font-size:50px; margin-bottom:10px;">
+                        <span class="fa fa-file"></span>
+                      </div>
+                  @endif
+                <span class="filename">{{ $file['realName'] }}</span>
+              </a>
+
+           </x-global::elements.card>
+    @endforeach
+    <br class="clearall" />
+    </ul>
+
+</div><!--mediamgr_content-->
+
+
+
+@if (count($files) == 0)
+    <div class="text-center">
+        <div style='width:33%' class='svgContainer'>
+            {!! file_get_contents(ROOT . '/dist/images/svg/undraw_image__folder_re_hgp7.svg') !!}
+            {!! __('text.no_files') !!}
+        </div>
+    </div>
+@endif
+<div style='clear:both'>&nbsp;</div>
+
+<script type='text/javascript'>
+    shiri.replaceSVGColors();
+</script>

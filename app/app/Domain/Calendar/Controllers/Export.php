@@ -1,0 +1,81 @@
+<?php
+
+namespace Shiri\Domain\Calendar\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Domain\Calendar\Permissions\CalendarPermissions;
+use Shiri\Domain\Calendar\Services\Calendar as CalendarService;
+use Shiri\Domain\Setting\Services\Setting as SettingService;
+use Symfony\Component\HttpFoundation\Response;
+
+class Export extends Controller
+{
+    private SettingService $settingService;
+
+    private CalendarService $calendarService;
+
+    /**
+     * Initializes dependencies.
+     */
+    public function init(
+        SettingService $settingService,
+        CalendarService $calendarService
+    ): void {
+        $this->settingService = $settingService;
+        $this->calendarService = $calendarService;
+    }
+
+    /**
+     * Displays the calendar export page.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(CalendarPermissions::VIEW)]
+    public function get(array $params): Response
+    {
+        $this->assignUrl();
+
+        return $this->tpl->displayPartial('calendar.export');
+    }
+
+    /**
+     * Handles iCal URL generation.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(CalendarPermissions::VIEW)]
+    public function post(array $params): Response
+    {
+        if (isset($_POST['remove'])) {
+            $this->settingService->deleteSetting('usersettings.'.session('userdata.id').'.icalSecret');
+            $this->tpl->setNotification('notifications.ical_removed_success', 'success');
+        } elseif (isset($_POST['generateUrl'])) {
+            try {
+                $this->calendarService->generateIcalHash();
+                $this->tpl->setNotification('notifications.ical_success', 'success');
+            } catch (\Exception $e) {
+                $this->tpl->setNotification($this->language->__('notification.ical_hash_problem'), 'error');
+            }
+        }
+
+        $this->assignUrl();
+
+        return $this->tpl->displayPartial('calendar.export');
+    }
+
+    /**
+     * Assigns the iCal URL to the template.
+     */
+    private function assignUrl(): void
+    {
+        $icalUrl = '';
+        try {
+            $icalUrl = $this->calendarService->getICalUrl();
+        } catch (\Exception $e) {
+            $this->tpl->setNotification($this->language->__('notification.ical_url_not_found'), 'error');
+        }
+
+        $this->tpl->assign('url', $icalUrl);
+    }
+}

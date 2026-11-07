@@ -1,0 +1,479 @@
+@extends($layout)
+
+@section('content')
+<x-global::layout.page-header icon="fa fa-gauge-high" :eyebrow="session('currentProjectClient')">
+    {!! __('headlines.project_dashboard') !!}
+    @if (count($allUsers) == 1)
+        <x-slot:actions>
+            <a href="#/users/newUser" class="headerCTA">
+                <i class="fa fa-users"></i>
+                <span class="tw-text-[14px] tw-leading-[25px]">
+                    {{ __('links.dont_do_it_alone') }}
+                </span>
+            </a>
+        </x-slot:actions>
+    @endif
+</x-global::layout.page-header>
+
+<div class="maincontent">
+    {!! $tpl->displayNotification() !!}
+
+    <div class="row">
+
+        <div class="col-md-8">
+
+            <x-global::layout.content-box class="tw-z-20">
+
+                @if ($login::userIsAtLeast($roles::$admin))
+                    <x-global::actions.dropdown variant="panel" menu-as="ul" class="pull-right dropdownWrapper">
+                        <x-slot:trigger class="btn round-button" data-tippy-content="{{ __('label.edit_project') }}" href="{{ BASE_URL }}/projects/showProject/{{ $project['id'] }}"><i class="fa fa-ellipsis"></i></x-slot:trigger>
+                            <li class="dropdown-item">
+                                <a
+                                    href="{{ BASE_URL }}/projects/showProject/{{ $project['id'] }}"
+
+                                ><i class="fa fa-edit"></i> {{ __('label.edit_project', 'Edit Project') }}</a>
+                            </li>
+                            <li class="dropdown-item">
+                                <a
+                                    href="{{ BASE_URL }}/projects/delProject/{{ $project['id'] }}"
+                                    class="delete"
+
+                                ><i class="fa fa-trash"></i> {{ __('label.deleteProject', 'Delete Project') }}</a>
+                            </li>
+
+                    </x-global::actions.dropdown>
+                @endif
+
+                <x-global::actions.dropdown variant="panel" menu-class="padding-md" keep-open class="pull-right dropdownWrapper tw-mr-[5px]">
+                    <x-slot:trigger class="btn round-button" data-tippy-content="{{ __('label.copy_url_tooltip') }}" href="{{ BASE_URL }}/projects/changeCurrentProject/{{ $project['id'] }}"><i class="fa fa-link"></i></x-slot:trigger>
+                    <x-global::forms.text-input id="projectUrl" value="{{ BASE_URL }}/projects/changeCurrentProject/{{ $project['id'] }}" />
+                    <x-global::forms.button contentRole="primary" onclick="shiri.snippets.copyUrl('projectUrl')">{{ __('links.copy_url') }}</x-global::forms.button>
+                </x-global::actions.dropdown>
+
+                <a
+                    href="javascript:void(0);"
+                    id="favoriteProject"
+                    class="btn pull-right margin-right {{ $isFavorite ? 'isFavorite' : ''}} tw-mr-[5px] round-button"
+                    data-tippy-content="{{ __('label.favorite_tooltip') }}"
+                ><i class="{{ $isFavorite ? 'fa-solid' : 'fa-regular' }} fa-star"></i></a>
+
+
+
+                <h3>{{ session("currentProjectClient") }}</h3>
+
+                <h1 class="articleHeadline">{{ $currentProjectName }}</h1>
+
+                <br/>
+
+                @include('projects::partials.checklist', [
+                    'progressSteps' => $progressSteps,
+                    'percentDone' => $percentDone
+                ])
+
+                <br/><br/>
+
+                    <strong>{{ __('label.background') }}</strong><br/>
+                <div class="readMoreBox">
+                    <div class="tiptap-content kanbanContent closed tw-max-h-[200px] readMoreContent tw-pb-[30px]" id="projectDescription">
+                        {!! $tpl->escapeMinimal($project['details']) !!}
+                    </div>
+
+                    <div class="center readMoreToggle" style="display:none;">
+                        <a href="javascript:void(0)" id="descriptionReadMoreToggle">{{ __('label.read_more') }}</a>
+                    </div>
+                </div>
+
+
+                <br/>
+
+            </x-global::layout.content-box>
+
+            <x-global::layout.content-box class="tw-z-10 latest-todos">
+                <x-global::forms.button tag="a" link="#/tickets/newTicket" contentRole="link" class="action-link pull-right" style="margin-top:-7px;"><i class="fa fa-plus"></i> {{ __('links.create_todo') }}</x-global::forms.button>
+                <x-global::elements.section-header as="h5">{{ __('headlines.latest_todos') }}</x-global::elements.section-header>
+                <br/>
+                <ul class="sortableTicketList">
+                    @if (count($tickets) == 0)
+                        <em>{{ __('text.nothing_to_see_here') }}</em><br/><br/>
+                    @endif
+
+                    @foreach($tickets as $row)
+                        <li class="ui-state-default" id="ticket_{{ $row['id'] }}">
+                            <x-global::elements.card compact class="ticketBox fixed priority-border-{{ $row['priority'] }}" data-val="{{ $row['id'] }}">
+                                <div class="row">
+                                    <div class="col-md-12 timerContainer tw-py-[5px] tw-px-[15px]" id="timerContainer-{{ $row['id'] }}">
+                                        @if($row['dependingTicketId'] > 0)
+                                        <a href="#/tickets/showTicket/{{  $row['dependingTicketId'] }}">
+                                            {{ $row['parentHeadline'] }}
+                                        </a>
+                                            //
+                                        @endif
+
+                                        <a href="#/tickets/showTicket/{{ $row['id'] }}">
+                                            <strong>{{ $row['headline'] }}</strong>
+                                        </a>
+
+                                        @include("tickets::partials.ticketsubmenu", ["ticket" => $row,"onTheClock" => $onTheClock])
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="col-md-4 tw-px-[15px] tw-py-0">
+
+                                        <i class="fa-solid fa-business-time infoIcon" data-tippy-content=" {{ __("label.due") }}"></i>
+
+                                             <input
+                                            type="text"
+                                            title="{{ __('label.due') }}"
+                                            value="{{ format($row['dateToFinish'])->date(__('text.anytime')) }}"
+                                            class="duedates secretInput"
+                                            data-id="{{ $row['id'] }}"
+                                            name="date"
+                                        />
+                                    </div>
+                                    <div class="col-md-8 tw-mt-[3px]">
+                                        <div class="right">
+                                            <x-tickets::chip-effort :ticket-id="$row['id']" :storypoints="$row['storypoints']" :efforts="$efforts" />
+
+                                            <x-tickets::chip-milestone :ticket-id="$row['id']" :milestone-id="$row['milestoneid']" :headline="$row['milestoneHeadline'] ?? ''" :color="$row['milestoneColor'] ?? ''" :milestones="$milestones" />
+
+                                            <x-tickets::chip-status :ticket-id="$row['id']" :status="$row['status']" :labels="$statusLabels" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </x-global::elements.card>
+                        </li>
+                    @endforeach
+                </ul>
+            </x-global::layout.content-box>
+
+            <x-global::layout.content-box class="team-container">
+                @dispatchEvent('teamBoxBeginning', ['project' => $project])
+
+                <x-global::elements.section-header as="h5">{{ __('tabs.team') }}</x-global::elements.section-header>
+
+                <div class="row teamBox">
+                    @foreach ($project['assignedUsers'] as $userId => $assignedUser)
+                        <div class="col-md-3">
+                            <x-users::profile-box :user="$assignedUser">
+                                @spaceless
+                                    @php $hasName = $assignedUser['firstname'] != '' || $assignedUser['lastname'] != ''; @endphp
+
+                                    @if ($hasName)
+                                        {{ sprintf(
+                                            __('text.full_name'),
+                                            $assignedUser['firstname'],
+                                            $assignedUser['lastname'],
+                                        ) }}
+                                    @else
+                                        {{ $assignedUser['username'] }}
+                                    @endif
+
+                                    <br />
+                                    <small>{{ $hasName ? $assignedUser['jobTitle'] : __('label.invited') }}</small>
+
+                                    @if ($hasName)
+                                        @dispatchEvent('usercardBottom', ['user' => $assignedUser, 'project' => $project])
+                                    @endif
+                                @endspaceless
+                            </x-users::profile-box>
+                        </div>
+                    @endforeach
+
+                    @if ($login::userIsAtLeast($roles::$manager))
+                        <div class="col-md-3">
+                            <x-users::profile-box>
+                                <a href="#/users/newUser?preSelectProjectId={{ $project['id'] }}">
+                                    {{ __('links.invite_user') }}
+                                </a><br/>&nbsp;
+                            </x-users::profile-box>
+                        </div>
+                    @endif
+                </div>
+            </x-global::layout.content-box>
+
+        </div>
+
+        <div class="col-md-4">
+
+            <x-global::layout.content-box class="project-updates">
+                <div class="pull-right">
+                    @if ($login::userIsAtLeast($roles::$editor))
+                        <x-global::forms.button
+                            tag="a"
+                            link="javascript:void(0);"
+                            onclick="shiri.commentsController.toggleCommentBoxes(0);jQuery('.noCommentsMessage').toggle();"
+                            id="mainToggler"
+                            contentRole="link"
+                            class="action-link"
+                            style="margin-top:-7px;"
+                        ><span class="fa fa-plus"></span> {{ __('links.add_new_report') }}</x-global::forms.button>
+                    @endif
+                </div>
+
+                <x-global::elements.section-header as="h5">{{ __('subtitles.project_updates') }}</x-global::elements.section-header>
+
+                <form method="post" action="{{ BASE_URL }}/dashboard/show">
+                    <input type="hidden" name="comment" value="1" />
+                        @if ($login::userIsAtLeast($roles::$editor))
+                            <div id="comment0" class="commentBox tw-hidden">
+                                <x-global::forms.label for="projectStatus tw-inline">{{ __('label.project_status_is') }}</x-global::forms.label>
+
+                                <x-global::forms.select name="status" id="projectStatus" class="tw-ml-0 tw-mb-[10px]">
+                                    <option value="green">{{ __('label.project_status_green') }}</option>
+                                    <option value="yellow">{{ __('label.project_status_yellow') }}</option>
+                                    <option value="red">{{ __('label.project_status_red') }}</option>
+                                </x-global::forms.select>
+
+                                <div class="commentReply">
+                                    <textarea rows="5" cols="50" class="tiptapSimple tw-w-full" name="text"></textarea>
+                                    <input
+                                        type="submit"
+                                        value="{{ __('buttons.save') }}"
+                                        name="comment"
+                                        class="btn btn-primary btn-success tw-ml-0"
+                                    />
+                                    <x-global::forms.button
+                                        tag="a"
+                                        link="javascript:void(0);"
+                                        onclick="shiri.commentsController.toggleCommentBoxes(-1);jQuery('.noCommentsMessage').toggle();"
+                                        class="tw-leading-[50px]"
+                                        contentRole="secondary"
+                                    >{{ __('links.cancel') }}</x-global::forms.button>
+                                    <input type="hidden" name="comment" value="1"/>
+                                    <input type="hidden" name="father" id="father" value="0"/>
+                                </div>
+                            </div>
+                        @endif
+
+                        <div id="comments">
+                            @foreach ($comments as $row)
+                                @if ($loop->iteration == 3)
+                                    <a href="javascript:void(0);" onclick="jQuery('.readMore').toggle('fast')">
+                                        {{ __('links.read_more') }}
+                                    </a>
+                                    <div class="readMore tw-hidden tw-mt-[20px]">
+                                @endif
+                                <div class="clearall">
+                                    <div>
+                                        <x-global::elements.card compact class="commentContent statusUpdate commentStatus-{{ $row['status'] }}">
+                                            <strong class="fancyLink">
+                                                {{ sprintf(
+                                                    __('text.report_written_on'),
+                                                    format($row['date'])->date(),
+                                                    format($row['date'])->time()
+                                                ) }}
+                                            </strong>
+                                                @if ($login::userIsAtLeast($roles::$editor))
+                                                    <x-global::actions.dropdown class="tw-float-right tw-ml-[10px]">
+                                                        @if ($row['userId'] == session("userdata.id"))
+                                                            <li>
+                                                                <a href="javascript:void(0);" class="deleteComment" data-post-field="delComment" data-post-value="{{ $row['id'] }}">
+                                                                    <span class="fa fa-trash"></span> {{ __('links.delete') }}
+                                                                </a>
+                                                            </li>
+                                                        @endif
+
+                                                        @isset($ticket->id)
+                                                            <li>
+                                                                <a
+                                                                    href="javascript:void(0);"
+                                                                    onclick="shiri.ticketsController.addCommentTimesheetContent({{ $row['id'] }}, {{ $ticket->id }})"
+                                                                >{{ __('links.add_to_timesheets') }}</a>
+                                                            </li>
+                                                        @endif
+                                                    </x-global::actions.dropdown>
+                                                @endif
+
+                                            <div class="text" id="commentText-{{ $row['id'] }}">{!! $tpl->escapeMinimal($row['text']) !!}</div>
+                                        </x-global::elements.card>
+
+                                        <div class="commentLinks">
+                                            <small class="right">
+                                                {!! sprintf(
+                                                    __('text.written_on_by'),
+                                                    format($row['date'])->date(),
+                                                    format($row['date'])->time(),
+                                                    $tpl->escape($row['firstname']),
+                                                    $tpl->escape($row['lastname'])
+                                                ) !!}
+                                            </small>
+
+                                            @if ($login::userIsAtLeast($roles::$commenter))
+                                                <a
+                                                    href="javascript:void(0);"
+                                                    onclick="shiri.commentsController.toggleCommentBoxes({{ $row['id'] }});"
+                                                ><span class="fa fa-reply"></span> {{ __('links.reply') }}
+                                                </a>
+                                            @endif
+                                        </div>
+
+                                        <div class="replies">
+                                            @if ($row['replies'])
+                                                @foreach ($row['replies'] as $comment)
+                                                    <x-comments::reply :comment="$comment" :iteration="$loop->iteration" />
+                                                @endforeach
+                                            @endif
+                                            <x-comments::input :commentId="$row['id']" :user="session('userdata')" />
+                                        </div>
+                                    </div>
+                                </div>
+                            @endforeach
+
+                            @if (count($comments) >= 3)
+                                </div>
+                            @endif
+                        </div>
+
+                    @if (count($comments) == 0)
+                        <div style="padding-left:0px; clear:both;" class="noCommentsMessage">
+                                {{ __('text.no_updates') }}
+                        </div>
+                    @endif
+                    <div class="clearall"></div>
+                </form>
+                <div class="clearall"></div>
+            </x-global::layout.content-box>
+
+            <x-global::layout.content-box class="project-progress">
+                <div class="row" id="projectProgressContainer">
+                    <div class="col-md-12">
+                        <x-global::elements.section-header as="h5">{{ __('subtitles.project_progress') }}</x-global::elements.section-header>
+
+                        <div id="canvas-holder" class="tw-w-full tw-h-[250px]">
+                            <canvas id="chart-area"></canvas>
+                        </div>
+
+                        <br/><br/>
+                    </div>
+                </div>
+
+                <div class="row" id="milestoneProgressContainer">
+                    <div class="col-md-12">
+                        <x-global::elements.section-header as="h5">{{ __('headline.milestones') }}</x-global::elements.section-header>
+                        <ul class="sortableTicketList">
+                            @if (count($milestones) == 0)
+                                <div class="center">
+                                    <br/>
+                                    <h4>{{ __('headlines.no_milestones') }}</h4>
+                                    {{ __('text.milestones_help_organize_projects') }}
+                                    <br/><br/>
+                                    <a href="{{ BASE_URL }}/tickets/roadmap">{!! __('links.goto_milestones') !!}</a>
+                                </div>
+                            @endif
+
+                            @foreach($milestones as $row)
+                                @if ($row->percentDone >= 100 && (new \DateTime($row->editTo) < new \DateTime()))
+                                    @break
+                                @endif
+
+                                <li class="ui-state-default" id="milestone_{{ $row->id }}">
+
+                                    <div hx-trigger="load"
+                                         hx-indicator=".htmx-indicator"
+                                         hx-get="<?= BASE_URL ?>/hx/tickets/milestones/showCard?milestoneId=<?= $row->id ?>">
+                                        <div class="htmx-indicator">
+                                                <?= $tpl->__('label.loading_milestone') ?>
+                                        </div>
+                                    </div>
+
+                                </li>
+                            @endforeach
+                        </ul>
+                    </div>
+                </div>
+            </x-global::layout.content-box>
+        </div>
+    </div>
+</div>
+
+@once @push('scripts')
+<script type='text/javascript'>
+    if (window.shiri && window.shiri.tiptapController) {
+        shiri.tiptapController.initSimpleEditor();
+    }
+</script>
+@endpush @endonce
+
+@once @push('scripts')
+<script>
+    @dispatchEvent('scripts.afterOpen')
+
+    jQuery(document).ready(function () {
+
+        jQuery('#descriptionReadMoreToggle').click(function() {
+
+            if (jQuery("#projectDescription").hasClass("closed")) {
+                jQuery("#projectDescription").css("max-height", "100%");
+                jQuery("#projectDescription").removeClass("closed");
+                jQuery("#projectDescription").removeClass("kanbanContent");
+                jQuery('#descriptionReadMoreToggle').text("{{ __('label.read_less') }}");
+            } else {
+                jQuery("#projectDescription").css("max-height", "200px");
+                jQuery("#projectDescription").addClass("closed");
+                jQuery("#projectDescription").addClass("kanbanContent");
+                jQuery('#descriptionReadMoreToggle').text("{{ __('label.read_more') }}");
+            }
+        });
+
+        jQuery(".readMoreBox").each(function() {
+            if (jQuery(this).find(".readMoreContent").height() >= 169) {
+
+                jQuery(this).find(".readMoreToggle").show();
+            }
+        });
+
+        jQuery(document).on('click', '.progressWrapper .dropdown-menu', function (e) {
+            e.stopPropagation();
+        });
+
+        @if ($login::userIsAtLeast($roles::$editor))
+            shiri.dashboardController.prepareHiddenDueDate();
+            shiri.usersController.initUserEditModal();
+        @else
+            shiri.authController.makeInputReadonly(".maincontentinner");
+        @endif
+
+        shiri.dashboardController.initProgressChart(
+            "chart-area",
+            {!! round($projectProgress['percent']) !!},
+            {!! round(100 - $projectProgress['percent']) !!}
+        );
+
+        jQuery("#favoriteProject").click(function() {
+            if (jQuery("#favoriteProject").hasClass("isFavorite")) {
+                shiri.reactionsController.removeReaction(
+                    'project',
+                    {!! $project['id'] !!},
+                    'favorite',
+                    function() {
+                        jQuery("#favoriteProject").find("i").removeClass("fa-solid").addClass("fa-regular");
+                        jQuery("#favoriteProject").removeClass("isFavorite");
+                    }
+                );
+            } else {
+                shiri.reactionsController.addReactions(
+                    'project',
+                    {!! $project['id'] !!},
+                    'favorite',
+                    function() {
+                        jQuery("#favoriteProject").find("i").removeClass("fa-regular").addClass("fa-solid");
+                        jQuery("#favoriteProject").addClass("isFavorite");
+                    }
+                );
+            }
+        });
+
+        shiri.ticketsController.initDueDateTimePickers();
+        shiri.ticketsController.initDueDateTimePickers();
+
+
+        @php(session(["usersettings.modals.projectDashboardTour" => 1]));
+    });
+
+    @dispatchEvent('scripts.beforeClose')
+</script>
+@endpush @endonce
+
+@endsection

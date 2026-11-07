@@ -1,0 +1,256 @@
+<?php
+
+namespace Shiri\Domain\Users\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Exceptions\AuthorizationException;
+use Shiri\Domain\Clients\Services\Clients as ClientService;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+use Shiri\Domain\Users\Permissions\UsersPermissions;
+use Shiri\Domain\Users\Repositories\Users as UserRepository;
+use Shiri\Domain\Users\Services\Users;
+use Symfony\Component\HttpFoundation\Response;
+
+class EditUser extends Controller
+{
+    private ProjectService $projectService;
+
+    private ClientService $clientService;
+
+    private Users $userService;
+
+    private UserRepository $userRepo;
+
+    /**
+     * Initializes dependencies.
+     */
+    public function init(
+        ProjectService $projectService,
+        ClientService $clientService,
+        Users $userService,
+        UserRepository $userRepo
+    ): void {
+        $this->projectService = $projectService;
+        $this->clientService = $clientService;
+        $this->userService = $userService;
+        $this->userRepo = $userRepo;
+    }
+
+    /**
+     * Displays the edit user form.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, global: true)]
+    public function get(array $params): Response
+    {
+        if (! isset($params['id'])) {
+            return $this->tpl->display('errors.error403', responseCode: 403);
+        }
+
+        $id = (int) $params['id'];
+        // Admin edit form needs the full row (e.g. pwReset for the invite
+        // link), so read from the repository — the service getUser strips
+        // secrets for API safety (#3556).
+        $row = $this->userRepo->getUser($id);
+
+        if ($row === false) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        if (array_key_exists('resendInvite', $_GET)) {
+            return $this->handleResendInvite($id, $row);
+        }
+
+        $values = $this->buildValuesFromUser($row);
+        $projectrelation = $this->userService->getUserProjectIds($id);
+
+        $this->generateFormTokens();
+
+        $this->tpl->assign('values', $values);
+        $this->tpl->assign('relations', $projectrelation);
+        $this->tpl->assign('id', $id);
+        $this->assignTemplateVars();
+
+        return $this->tpl->display('users.editUser');
+    }
+
+    /**
+     * Handles user profile updates.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, global: true)]
+    public function post(array $params): Response
+    {
+        if (! isset($params['id'])) {
+            return $this->tpl->display('errors.error403', responseCode: 403);
+        }
+
+        $id = (int) $params['id'];
+        // Admin edit form needs the full row (e.g. pwReset for the invite
+        // link), so read from the repository — the service getUser strips
+        // secrets for API safety (#3556).
+        $row = $this->userRepo->getUser($id);
+
+        if ($row === false) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        $values = $this->buildValuesFromUser($row);
+        $edit = false;
+
+        if (isset($_POST['save'])) {
+            if (! isset($_POST[session('formTokenName')]) || $_POST[session('formTokenName')] != session('formTokenValue')) {
+                $this->tpl->setNotification($this->language->__('notification.form_token_incorrect'), 'error');
+            } else {
+                $values = $this->buildValuesFromPost($row);
+                $edit = $this->handleValidation($values, $row, $id);
+            }
+        }
+
+        if ($edit) {
+            try {
+                $this->userService->updateUser($values, $id, $_POST['projects'] ?? null);
+                $this->tpl->setNotification($this->language->__('notifications.user_edited'), 'success');
+            } catch (AuthorizationException $e) {
+                $values = $this->buildValuesFromUser($row);
+                $this->tpl->setNotification($this->language->__('notification.role_not_allowed'), 'error');
+            }
+        }
+
+        $projectrelation = $this->userService->getUserProjectIds($id);
+
+        $this->generateFormTokens();
+
+        $this->tpl->assign('values', $values);
+        $this->tpl->assign('relations', $projectrelation);
+        $this->tpl->assign('id', $id);
+        $this->assignTemplateVars();
+
+        return $this->tpl->display('users.editUser');
+    }
+
+    /**
+     * Handles the resend invite action.
+     */
+    private function handleResendInvite(int $id, array $row): Response
+    {
+        $result = $this->userService->resendUserInvite($id, $row);
+
+        if ($result === 'too_soon') {
+            $this->tpl->setNotification($this->language->__('notification.invite_too_soon'), 'error');
+        } elseif ($result === 'too_many_invites') {
+            $this->tpl->setNotification($this->language->__('notification.too_many_invites'), 'error');
+        } elseif ($result === 'invite_email_failed') {
+            $this->tpl->setNotification($this->language->__('notification.invite_email_failed'), 'error');
+        } else {
+            $this->tpl->setNotification($this->language->__('notification.invitation_sent'), 'success', 'userinvitation_sent');
+        }
+
+        return Frontcontroller::redirect(BASE_URL.'/users/editUser/'.$id);
+    }
+
+    /**
+     * Validates a user update and sets the matching notification on failure.
+     *
+     * @return bool True if the update should proceed.
+     */
+    private function handleValidation(array $values, array $row, int $id): bool
+    {
+        $result = $this->userService->validateUserUpdate($values, $row, $id, $_POST);
+
+        if ($result === 'valid') {
+            return true;
+        }
+
+        $messages = [
+            'passwords_dont_match' => 'notification.passwords_dont_match',
+            'enter_email' => 'notification.enter_email',
+            'no_valid_email' => 'notification.no_valid_email',
+            'user_exists' => 'notification.user_exists',
+        ];
+
+        $this->tpl->setNotification($this->language->__($messages[$result]), 'error');
+
+        return false;
+    }
+
+    /**
+     * Builds a values array from the user database row.
+     */
+    private function buildValuesFromUser(array $row): array
+    {
+        return [
+            'id' => $row['id'],
+            'firstname' => $row['firstname'],
+            'lastname' => $row['lastname'],
+            'user' => $row['username'],
+            'phone' => $row['phone'],
+            'status' => $row['status'],
+            'role' => $row['role'],
+            'hours' => $row['hours'],
+            'wage' => $row['wage'],
+            'clientId' => $row['clientId'],
+            'source' => $row['source'],
+            'pwReset' => $row['pwReset'],
+            'jobTitle' => $row['jobTitle'],
+            'jobLevel' => $row['jobLevel'],
+            'department' => $row['department'],
+            'weekly_hours' => $row['weekly_hours'] ?? null,
+            'employment_type' => $row['employment_type'] ?? null,
+        ];
+    }
+
+    /**
+     * Builds a values array from POST data, falling back to the original user row.
+     */
+    private function buildValuesFromPost(array $row): array
+    {
+        return [
+            'id' => $row['id'],
+            'firstname' => $_POST['firstname'] ?? $row['firstname'],
+            'lastname' => $_POST['lastname'] ?? $row['lastname'],
+            'user' => $_POST['user'] ?? $row['username'],
+            'phone' => $_POST['phone'] ?? $row['phone'],
+            'status' => $_POST['status'] ?? $row['status'],
+            'role' => $_POST['role'] ?? $row['role'],
+            'hours' => $_POST['hours'] ?? $row['hours'],
+            'wage' => $_POST['wage'] ?? $row['wage'],
+            'clientId' => $_POST['client'] ?? $row['clientId'],
+            'source' => $row['source'],
+            'pwReset' => $row['pwReset'],
+            'jobTitle' => $_POST['jobTitle'] ?? $row['jobTitle'],
+            'jobLevel' => $_POST['jobLevel'] ?? $row['jobLevel'],
+            'department' => $_POST['department'] ?? $row['department'],
+            // Capacity fields — only pass when actually posted so the
+            // repo's array_key_exists guard preserves existing values on
+            // a form submit that omits them (non-admin path today, but
+            // also future partial-update callers).
+            ...(array_key_exists('weekly_hours', $_POST) ? ['weekly_hours' => $_POST['weekly_hours']] : []),
+            ...(array_key_exists('employment_type', $_POST) ? ['employment_type' => $_POST['employment_type']] : []),
+        ];
+    }
+
+    /**
+     * Generates CSRF form tokens.
+     */
+    private function generateFormTokens(): void
+    {
+        session(['formTokenName' => bin2hex(random_bytes(16))]);
+        session(['formTokenValue' => bin2hex(random_bytes(16))]);
+    }
+
+    /**
+     * Assigns common template variables.
+     */
+    private function assignTemplateVars(): void
+    {
+        $this->tpl->assign('allProjects', $this->projectService->getAll(true));
+        $this->tpl->assign('roles', $this->userService->getAssignableRoles());
+        $this->tpl->assign('clients', $this->clientService->getAll());
+        $this->tpl->assign('status', $this->userService->getUserStatuses());
+    }
+}

@@ -1,0 +1,101 @@
+<?php
+
+namespace Shiri\Core\Auth;
+
+use Shiri\Core\Auth\Contracts\ChecksProjectAccess;
+use Shiri\Domain\Auth\Models\Roles;
+use Shiri\Domain\Auth\Services\Auth as AuthService;
+
+/**
+ * Single home for resolving a user's EFFECTIVE role, in both scopes Shiri cares about.
+ *
+ * Shiri roles are project-scoped: a user can hold one role globally
+ * (`session('userdata.role')`) and a different role inside a given project
+ * (`zp_relationuserproject.projectRole`). Authorization correctness depends on picking
+ * the right one:
+ *  - {@see effectiveRole()} resolves the role for the CURRENT SESSION project — the
+ *    historical behavior of `Auth::getRoleToCheck()`, which this delegates to (no
+ *    duplication). Use it for "is the current screen allowed" checks.
+ *  - {@see effectiveRoleForProject()} resolves the role for a SPECIFIC project — the
+ *    only correct basis for authorizing a mutation on an entity that may live outside
+ *    the session project. It centralizes the logic previously private to
+ *    `Tickets::userIsAtLeastForProject()`.
+ *
+ * This is infrastructure shared across every domain, hence it lives in Core/Auth. It
+ * still references the Domain-layer `Roles` definitions and `Projects` service for now;
+ * those are stable value/lookup surfaces and the coupling is intentional pragmatism
+ * (the broader Roles->Core move is deferred).
+ */
+class RoleResolver
+{
+    public function __construct(private ChecksProjectAccess $projectAccess) {}
+
+    /** The current user's global role string, or null when not authenticated. */
+    public function globalRole(): ?string
+    {
+        $role = session('userdata.role');
+
+        return ($role === null || $role === '') ? null : $role;
+    }
+
+    /**
+     * Effective role for the current session project (delegates to the existing
+     * dual-scope resolution). `$forceGlobal` short-circuits to the global role for
+     * company-wide screens (users/clients/settings).
+     */
+    public function effectiveRole(bool $forceGlobal = false): string|false
+    {
+        return AuthService::getRoleToCheck($forceGlobal);
+    }
+
+    /**
+     * Effective role for a specific project. Manager/admin/owner keep their global role
+     * everywhere; otherwise the explicit project role applies, falling back to the
+     * global role when none is set. Returns false when not authenticated.
+     */
+    public function effectiveRoleForProject(int $projectId): string|false
+    {
+        $globalRole = $this->globalRole();
+
+        if ($globalRole === null) {
+            return false;
+        }
+
+        // Manager and above keep their global role across every project.
+        if (Roles::isAtLeast($globalRole, Roles::$manager)) {
+            return $globalRole;
+        }
+
+        $roles = Roles::getRoles();
+
+        $projectRole = $this->projectAccess->getProjectRole((int) session('userdata.id'), $projectId);
+
+        // No explicit project role -> inherit the global role.
+        if ($projectRole === '') {
+            return $globalRole;
+        }
+
+        // getProjectRole() returns either a numeric role key or, for legacy rows, a role name.
+        // Resolve a numeric key to its role string; accept an already-valid role name as-is. Anything
+        // that still can't be resolved falls back to the global role rather than denying a genuine
+        // member (false -> 403 is worse than granting their inherited global role) (#3618).
+        $resolvedRole = ctype_digit((string) $projectRole)
+            ? Roles::getRoleString((int) $projectRole)
+            : (in_array($projectRole, $roles, true) ? $projectRole : false);
+
+        return $resolvedRole === false ? $globalRole : $resolvedRole;
+    }
+
+    /**
+     * True when $effectiveRole ranks at or above $requiredRole in the role hierarchy
+     * (by level, see {@see Roles::isAtLeast()}).
+     */
+    public function atLeast(string $requiredRole, string|false $effectiveRole): bool
+    {
+        if ($effectiveRole === false) {
+            return false;
+        }
+
+        return Roles::isAtLeast($effectiveRole, $requiredRole);
+    }
+}

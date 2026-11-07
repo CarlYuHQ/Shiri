@@ -1,0 +1,130 @@
+<?php
+
+namespace Shiri\Domain\ContentTemplates\Services\Appliers;
+
+use Illuminate\Database\ConnectionInterface;
+use Shiri\Core\Db\Db as DbCore;
+use Shiri\Domain\ContentTemplates\Contracts\Applier;
+use Shiri\Domain\ContentTemplates\Models\ContentTemplate;
+
+/**
+ * Applier for canvas-typed content templates.
+ *
+ * Handles any canvas type whose items live in zp_canvas_items (Logic Model,
+ * Goal Canvas, Lean Canvas, SWOT, etc.). The appliesTo string is the canvas
+ * type slug — same slug Blueprints' TemplateRegistry uses. supports() returns
+ * true for everything except known non-canvas appliesTo values (e.g. "wiki"),
+ * so this is the catch-all canvas applier.
+ *
+ * Expected payload shape:
+ *
+ *     items:
+ *       - box: "lm_inputs"           # required, canvas-type box key
+ *         title: "..."               # populates description (the bold line)
+ *         description: "..."         # populates conclusion (the supporting prose)
+ *         status: "status_draft"     # optional, defaults to ''
+ *         sortindex: 10              # optional, auto-assigned by insertion order if absent
+ *         why_this_matters: "..."    # optional, Outcome/Impact items only (authored meaning)
+ *         starting_picture: "..."    # optional, Impact items only (the world today)
+ *
+ * The unusual title→description / description→conclusion mapping matches the
+ * Canvas item display convention: description is rendered as the bold card
+ * title, conclusion as the lighter supporting text. Meaning fields pass
+ * through with their DB column names — no remapping.
+ */
+class CanvasItemsApplier implements Applier
+{
+    /** Non-canvas appliesTo values this applier explicitly refuses. */
+    private const NON_CANVAS = ['wiki'];
+
+    /** Resolved on first use so a stubbed DbCore in unit tests doesn't fault. */
+    private ?ConnectionInterface $db = null;
+
+    public function __construct(private DbCore $dbCore) {}
+
+    public function supports(string $appliesTo): bool
+    {
+        return $appliesTo !== '' && ! in_array($appliesTo, self::NON_CANVAS, true);
+    }
+
+    public function apply(int $targetId, ContentTemplate $template, array $options = []): int
+    {
+        if ($targetId <= 0 || ! $template->isUsable()) {
+            return 0;
+        }
+
+        $items = (array) ($template->payload['items'] ?? []);
+        if ($items === []) {
+            return 0;
+        }
+
+        $db = $this->db();
+        $userId = (int) ($options['userId'] ?? 0);
+        $mode = $options['mode'] ?? 'add';
+
+        if ($mode === 'replace') {
+            $db->table('zp_canvas_items')
+                ->where('canvasId', $targetId)
+                ->delete();
+        }
+
+        $sortBase = $this->nextSortIndex($targetId);
+        $created = 0;
+        // One timestamp for the whole apply — all items from the same template
+        // application should share created/modified so recent-activity sorts
+        // don't rank them arbitrarily against each other.
+        $now = dtHelper()->dbNow()->formatDateTimeForDb(); // UTC, not the request user's tz
+
+        foreach ($items as $offset => $item) {
+            if (! is_array($item) || empty($item['box'])) {
+                continue;
+            }
+            $row = [
+                'canvasId' => $targetId,
+                'box' => (string) $item['box'],
+                'description' => (string) ($item['title'] ?? ''),
+                'conclusion' => (string) ($item['description'] ?? ''),
+                'status' => (string) ($item['status'] ?? ''),
+                'author' => $userId,
+                'created' => $now,
+                // MAX(zp_canvas_items.modified) is the source of truth for a
+                // board's "last updated" timestamp (see BlueprintsRepository's
+                // COALESCE(MAX(modified), created) sort). MAX() ignores nulls,
+                // so leaving modified null makes templated boards appear stale
+                // in recent-activity lists even though items were just added.
+                'modified' => $now,
+                'sortindex' => (int) ($item['sortindex'] ?? ($sortBase + $offset * 10)),
+            ];
+            // Authored-meaning fields pass through if present in the template.
+            // YAML keys match DB column names — no remapping like title→description.
+            if (array_key_exists('why_this_matters', $item)) {
+                $row['why_this_matters'] = (string) $item['why_this_matters'];
+            }
+            if (array_key_exists('starting_picture', $item)) {
+                $row['starting_picture'] = (string) $item['starting_picture'];
+            }
+            $db->table('zp_canvas_items')->insert($row);
+            $created++;
+        }
+
+        return $created;
+    }
+
+    /**
+     * Find the next free sortindex on this canvas, leaving room between entries.
+     * Returns at least 10 so the first item is sortindex >= 10.
+     */
+    private function nextSortIndex(int $canvasId): int
+    {
+        $max = (int) $this->db()->table('zp_canvas_items')
+            ->where('canvasId', $canvasId)
+            ->max('sortindex');
+
+        return $max > 0 ? $max + 10 : 10;
+    }
+
+    private function db(): ConnectionInterface
+    {
+        return $this->db ??= $this->dbCore->getConnection();
+    }
+}

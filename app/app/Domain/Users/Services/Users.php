@@ -1,0 +1,1908 @@
+<?php
+
+namespace Shiri\Domain\Users\Services;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Auth\RoleCeiling;
+use Shiri\Core\Configuration\Environment;
+use Shiri\Core\Domains\BaseService;
+use Shiri\Core\Exceptions\AuthorizationException;
+use Shiri\Core\Exceptions\ValidationException;
+use Shiri\Core\Http\TrustedAppUrl;
+use Shiri\Core\Language as LanguageCore;
+use Shiri\Core\Mailer as MailerCore;
+use Shiri\Core\Support\Avatarcreator;
+use Shiri\Core\Support\NameSanitizer;
+use Shiri\Core\UI\Theme as ThemeCore;
+use Shiri\Domain\Auth\Models\Roles;
+use Shiri\Domain\Auth\Services\Auth;
+use Shiri\Domain\Auth\Services\Auth as AuthService;
+use Shiri\Domain\Clients\Repositories\Clients as ClientRepository;
+use Shiri\Domain\Files\Services\Files;
+use Shiri\Domain\Ldap\Services\Ldap as LdapService;
+use Shiri\Domain\Notifications\Models\Notification;
+use Shiri\Domain\Notifications\Services\PushPreferences;
+use Shiri\Domain\Notifications\Services\Webhooks;
+use Shiri\Domain\Projects\Repositories\Projects as ProjectRepository;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+use Shiri\Domain\Setting\Services\Setting as SettingService;
+use Shiri\Domain\Users\Events\AppearanceUpdated;
+use Shiri\Domain\Users\Events\InviteSent;
+use Shiri\Domain\Users\Events\UserCreated;
+use Shiri\Domain\Users\Exceptions\WebhookSettingNotSavedException;
+use Shiri\Domain\Users\Permissions\UsersPermissions;
+use Shiri\Domain\Users\Repositories\Users as UserRepository;
+use Ramsey\Uuid\Uuid;
+use SVG\SVG;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * @api
+ */
+class Users extends BaseService
+{
+    public function __construct(
+        protected UserRepository $userRepo,
+        protected LanguageCore $language,
+        protected ProjectRepository $projectRepository,
+        protected ClientRepository $clientRepo,
+        protected AuthService $authService,
+        protected Files $fileService,
+        protected Avatarcreator $avatarcreator,
+        protected SettingService $settingsService,
+        protected ThemeCore $themeCore,
+        protected ProjectService $projectService
+    ) {}
+
+    // GET
+
+    /**
+     * @return SVG|Response|string Returns either an SVG file, a file response or a path to a file
+     *
+     * @throws BindingResolutionException
+     *
+     * @api
+     *
+     * Intentionally NOT gated by a users.* permission: avatars are non-sensitive and rendered
+     * for every user across the app (the avatar route resolves through here). The sensitive
+     * account/roster surface is getAll()/getAllVisibleToUser(), which ARE users.view-gated.
+     */
+    public function getProfilePicture($id): SVG|Response|string
+    {
+
+        // Get profile picture definition from db
+        $profile = $this->userRepo->getProfilePicture($id);
+
+        // If can't find user, return ghost
+        if (empty($profile)) {
+            return $this->avatarcreator->getAvatar('👻');
+        }
+
+        // If user uploaded return uploaded file
+        if (! empty($profile['profileId'])) {
+
+            $file = $this->fileService->getFileById($profile['profileId']);
+            if ($file) {
+                return $file;
+            }
+
+        }
+
+        // Otherwise return avatar
+        $name = $profile['firstname'].' '.$profile['lastname'];
+
+        return $this->avatarcreator->getAvatar($name);
+
+    }
+
+    /**
+     * Updates another user's account.
+     *
+     * Role ceiling: the caller may not edit an account whose current role is above their own,
+     * nor assign a role above their own.
+     *
+     * @param  array  $values  The user values to store.
+     * @param  int|string  $id  The id of the user being edited.
+     * @return bool True on success.
+     *
+     * @throws AuthorizationException When the role ceiling is violated.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, global: true)]
+    public function editUser($values, $id): bool
+    {
+        $this->assertUserManageable((int) $id);
+
+        if (array_key_exists('role', $values)) {
+            $this->assertRoleAssignable($values['role']);
+        }
+
+        if (isset($values['firstname'])) {
+            $values['firstname'] = NameSanitizer::clean($values['firstname']);
+        }
+        if (isset($values['lastname'])) {
+            $values['lastname'] = NameSanitizer::clean($values['lastname']);
+        }
+
+        $results = $this->userRepo->editUser($values, $id);
+        self::dispatch_event('editUser', ['id' => $id, 'values' => $values]);
+
+        return $results;
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getNumberOfUsers(bool $activeOnly = false, bool $includeApi = true): int
+    {
+        $filters = [];
+
+        if ($activeOnly) {
+            $filters[] = ['status', '=', 'a'];
+        }
+
+        if (! $includeApi) {
+            $filters[] = ['source', '!=', 'api'];
+        }
+
+        return $this->userRepo->getNumberOfUsers($filters);
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getAll(bool $activeOnly = false): mixed
+    {
+        $users = $this->userRepo->getAll($activeOnly);
+
+        $users = self::dispatch_filter('getAll', $users);
+
+        return $users;
+    }
+
+    /**
+     * Request-level cache for getUser() results.
+     * Prevents duplicate DB queries when the same user is fetched
+     * multiple times within a single request (common in view composers).
+     *
+     * @var array<int|string, array|bool>
+     */
+    private array $userCache = [];
+
+    /**
+     * @api
+     *
+     * Default to the session user when no id is provided. Same server-
+     * authoritative pattern as getUsersWithProjectAccess — mobile clients
+     * authenticate via Bearer token and don't always know their own real
+     * user id (the login response returns the access-token row id, not
+     * the underlying user id), so they need a "who am I" endpoint that
+     * doesn't require the answer they're trying to look up.
+     *
+     * Intentionally NOT gated by users.view: this is the foundational user read used by dozens
+     * of internal view composers (comment authors, assignees, avatars) and the self "who am I"
+     * lookup — gating it would break those for non-admins. The sensitive roster/management
+     * surface is getAll()/getAllVisibleToUser(), which ARE users.view-gated.
+     */
+    public function getUser($id = null): array|bool
+    {
+        $resolvedId = $id;
+        if ($resolvedId === null || (int) $resolvedId === 0) {
+            $resolvedId = (int) session('userdata.id');
+            if ($resolvedId === 0) {
+                return false;
+            }
+        }
+
+        if (isset($this->userCache[$resolvedId])) {
+            return $this->userCache[$resolvedId];
+        }
+
+        $user = $this->stripSensitiveUserFields($this->userRepo->getUser($resolvedId));
+        $this->userCache[$resolvedId] = $user;
+
+        return $user;
+    }
+
+    /**
+     * Fields on the zp_user row that must never reach an API caller: the
+     * bcrypt password, the plaintext TOTP seed, the session token, and the
+     * password-reset token/metadata. Authentication, 2FA and session flows
+     * read these straight from the repository (Users\Repositories\Users and
+     * the Auth repos), never through this service — so stripping them here
+     * closes the @api read paths (getUser is intentionally ungated so view
+     * composers keep working — see above) without breaking login.
+     *
+     * @see https://github.com/Shiri/shiri/issues/3556
+     */
+    private const SENSITIVE_USER_FIELDS = [
+        'password',
+        'twoFASecret',
+        'session',
+        'sessiontime',
+        'pwReset',
+        'pwResetExpiration',
+        'pwResetCount',
+    ];
+
+    /**
+     * Remove sensitive fields from a single user row before it is returned to
+     * an API caller. Passes the `false` "not found" shape through untouched.
+     */
+    private function stripSensitiveUserFields(array|bool $user): array|bool
+    {
+        if (! is_array($user)) {
+            return $user;
+        }
+
+        foreach (self::SENSITIVE_USER_FIELDS as $field) {
+            unset($user[$field]);
+        }
+
+        return $user;
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getUserByEmail($email, $status = 'a'): false|array
+    {
+        return $this->stripSensitiveUserFields($this->userRepo->getUserByEmail($email, $status));
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getAllBySource($source): false|array
+    {
+        return $this->userRepo->getAllBySource($source);
+    }
+
+    // POST
+
+    /**
+     * @throws BindingResolutionException
+     *
+     * @internal Internal-only; deliberately excluded from the JSON-RPC surface. Invoked only by
+     *           Users\Controllers\ProfileImage, which always passes the session user's id. The
+     *           method trusts the $id it is given, so exposing it would let a user overwrite
+     *           another user's photo.
+     */
+    public function setProfilePicture($photo, $id): void
+    {
+        $user = $this->getUser($id);
+
+        // Save the path to the old picture
+        $oldPicture = null;
+        if (isset($user['profileId']) && $user['profileId'] > 0) {
+            $oldPicture = $user['profileId'];
+        }
+
+        $shiriFile = $this->fileService->upload($photo, 'user', $id);
+
+        if ($shiriFile
+            && $this->userRepo->setPicture($shiriFile['fileId'], $id)
+            && $oldPicture) {
+
+            try {
+                $this->fileService->deleteFile($oldPicture);
+            } catch (\Exception $e) {
+                Log::warning('Could not delete old profile picture: '.$e->getMessage());
+                Log::warning($e);
+            }
+
+        }
+
+    }
+
+    /**
+     * @api
+     */
+    public function updateUserSettings($category, $setting, $value): bool
+    {
+
+        $filteredInput = htmlspecialchars($setting);
+        $filteredValue = htmlspecialchars($value);
+
+        session(['usersettings.'.$category.'.'.$filteredInput => $filteredValue]);
+
+        $serializeSettings = serialize(session('usersettings'));
+
+        return $this->userRepo->patchUser(session('userdata.id'), ['settings' => $serializeSettings]);
+    }
+
+    /**
+     * Records that the current user dismissed a modal.
+     *
+     * The dismissal is always stored in the session. When $permanent is true it is
+     * additionally persisted to the user's stored settings so the modal stays
+     * dismissed across sessions.
+     *
+     * @param  string  $modalKey  The modal identifier being dismissed
+     * @param  bool  $permanent  Whether to persist the dismissal beyond the current session
+     * @return bool True on success
+     *
+     * @api
+     */
+    public function saveModalDismissal(string $modalKey, bool $permanent): bool
+    {
+        if ($permanent) {
+            // updateUserSettings sanitizes the key, records it in the session, and persists it.
+            return $this->updateUserSettings('modals', $modalKey, 1);
+        }
+
+        $key = htmlspecialchars($modalKey);
+
+        if (! session()->exists('usersettings.modals')) {
+            session(['usersettings.modals' => []]);
+        }
+
+        session(['usersettings.modals.'.$key => 1]);
+
+        return true;
+    }
+
+    /**
+     * checkPasswordStrength - Checks password strength for minimum requirements
+     * Current requirements are:
+     * Password must be at least 8 characters in length.
+     * Password must include at least one upper case letter.
+     * Password must include at least one number.
+     * Password must include at least one special character.
+     *
+     * @param  string  $password  The string to be checked
+     * @return bool returns true if password meets requirements
+     */
+    public function checkPasswordStrength(string $password): bool
+    {
+
+        // Validate password strength
+        // Password must be at least 8 characters in length.
+        // Password must include at least one upper case letter.
+        // Password must include at least one number.
+        // Password must include at least one special character.
+
+        $uppercase = preg_match('@[A-Z]@', $password);
+        $lowercase = preg_match('@[a-z]@', $password);
+        $number = preg_match('@[0-9]@', $password);
+        $specialChars = preg_match('@[^\w]@', $password);
+
+        if (! $uppercase || ! $lowercase || ! $number || ! $specialChars || strlen($password) < 8) {
+            return false;
+        } else {
+            return true;
+        }
+    }
+
+    /**
+     * createUserInvite - generates a new invite token, creates the user in the db and sends the invitation email TODO: Should accept userModel
+     *
+     * @param  array  $values  basic user values
+     * @return false|string returns the new user id on success, false on failure or
+     *                      when the invite rate limit is exhausted
+     *
+     * @throws BindingResolutionException
+     * @throws AuthorizationException When the requested role is above the caller's role.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::CREATE, global: true)]
+    public function createUserInvite(array $values): false|string
+    {
+        $invite = $this->createUserInviteWithStatus($values);
+
+        return $invite === false ? false : $invite['userId'];
+    }
+
+    /**
+     * Creates an invited user and sends the invitation, reporting whether the email went out.
+     *
+     * The user exists even when the email fails (e.g. bad SMTP settings); the admin can fix the
+     * mail settings and resend, so the caller must be able to tell them (#1795).
+     *
+     * Requires users.create here, not only at the entry points, because other services (e.g. the
+     * onboarding invite step) call it directly. Role ceiling: the requested role may not exceed the
+     * caller's own role. Callers below admin can only invite into their own client.
+     *
+     * @param  array  $values  The new user's values.
+     * @return false|array{userId: string, emailSent: bool} False when the user wasn't created.
+     *
+     * @throws AuthorizationException When the caller may not create users or the requested role
+     *                                is above the caller's role.
+     */
+    public function createUserInviteWithStatus(array $values): false|array
+    {
+        $this->authorize(UsersPermissions::CREATE, forceGlobal: true);
+        $this->assertRoleAssignable($values['role'] ?? '');
+
+        if ($this->callerIsBelowAdmin()) {
+            $values['clientId'] = session('userdata.clientId') ?? '';
+        }
+
+        $values['source'] = $this->allowedAccountSource($values['source'] ?? '');
+
+        if ($this->invitesRateLimited()) {
+            return false;
+        }
+
+        $values['firstname'] = NameSanitizer::clean($values['firstname'] ?? '');
+        $values['lastname'] = NameSanitizer::clean($values['lastname'] ?? '');
+
+        // Generate strong password
+        $tempPasswordVar = Uuid::uuid4()->toString();
+        $inviteCode = Uuid::uuid4()->toString();
+
+        $values['password'] = $tempPasswordVar;
+        $values['status'] = 'i';
+        $values['pwReset'] = $inviteCode;
+
+        $result = $this->userRepo->addUser($values);
+
+        if ($result === false) {
+            return false;
+        }
+
+        UserCreated::dispatch(userId: (int) $result, role: (int) Roles::getRoleKey($values['role'] ?? ''), source: 'invite');
+
+        $emailSent = $this->sendUserInvite($inviteCode, $values['user']);
+
+        if ($emailSent) {
+            InviteSent::dispatch(userId: (int) $result);
+        }
+
+        return ['userId' => $result, 'emailSent' => $emailSent];
+    }
+
+    /**
+     * Sends the invitation email with the account-setup link to a user.
+     *
+     * The link uses the trusted application URL ({@see TrustedAppUrl}); when none is known the
+     * email is not sent and false is returned.
+     *
+     * @param  string  $inviteCode  The invite/password-reset code for the setup link.
+     * @param  string  $user  The recipient's email address (username).
+     * @return bool True when the email was sent, false when delivery failed.
+     *
+     * @throws BindingResolutionException
+     */
+    public function sendUserInvite(string $inviteCode, string $user): bool
+    {
+        // The invite link sets the account's password, so it is only ever built from a trusted
+        // app URL, never from the request host.
+        $trustedAppUrl = app()->make(TrustedAppUrl::class)->get();
+        if ($trustedAppUrl === null) {
+            Log::warning('Invitation email not sent: the application URL is unknown. Set LEAN_APP_URL to your public URL (e.g. https://pm.example.com).');
+
+            return false;
+        }
+
+        $mailer = app()->make(MailerCore::class);
+        $mailer->setContext('new_user');
+
+        $mailer->setSubject($this->language->__('email_notifications.new_user_subject'));
+        $actual_link = $trustedAppUrl.'/auth/userInvite/'.$inviteCode;
+
+        // The inviter identifies themselves in the body only (sanitized name + verified email);
+        // the From header stays a fixed 'Shiri' so user content never reaches mail headers.
+        $inviterName = NameSanitizer::clean(session('userdata.name') ?? '');
+        $inviterDisplay = $inviterName !== '' ? $inviterName : 'Shiri';
+
+        $inviterEmail = filter_var((string) (session('userdata.mail') ?? ''), FILTER_VALIDATE_EMAIL);
+        if ($inviterEmail !== false) {
+            $inviterDisplay .= ' ('.$inviterEmail.')';
+        }
+
+        // Every interpolated value is HTML-escaped with a fixed UTF-8 encoding (ENT_SUBSTITUTE
+        // replaces invalid byte sequences rather than emitting an empty string). The link sits
+        // inside a single-quoted href, so ENT_QUOTES is required even though it is system-built.
+        $escape = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        $message = sprintf(
+            $this->language->__('email_notifications.user_invite_message'),
+            $escape($inviterDisplay),
+            $escape($actual_link),
+            $escape($user)
+        );
+
+        $mailer->setHtml($message);
+
+        $to = [$user];
+
+        return $mailer->sendMail($to, 'Shiri');
+    }
+
+    /**
+     * Checks and consumes the invite-email rate limit for the authenticated inviter.
+     *
+     * Caps invites per inviting user per hour and per installation per day so a single
+     * account cannot use invite emails as a spam channel. This is the entry-point-agnostic
+     * backstop: it covers the web form, JSON-RPC (shiri.rpc.*.inviteNewUser) and resend
+     * alike, because it runs in the service layer. The per-IP throttle in RequestRateLimiter
+     * is an additional layer for the unauthenticated/web signup form only.
+     *
+     * The counter records invite *attempts*, not successful sends: the token is consumed
+     * before the DB insert, so a subsequent insert failure still counts. This is deliberate —
+     * it fails safe (over-counts, never under-counts) and keeps the check side-effect-cheap.
+     *
+     * Not logged per attempt: a blocked attacker could otherwise amplify the block into log
+     * spam. Enforcement is the RateLimiter itself; aggregate abuse monitoring belongs elsewhere.
+     *
+     * @return bool True when the limit is exhausted and no invite may be sent.
+     */
+    private function invitesRateLimited(): bool
+    {
+        $inviterId = (int) (session('userdata.id') ?? 0);
+        if ($inviterId === 0) {
+            return false;
+        }
+
+        $config = app()->make(Environment::class);
+        $userLimit = (int) ($config->ratelimitInvitesUser ?? 10);
+        $tenantLimit = (int) ($config->ratelimitInvitesTenant ?? 30);
+
+        // BASE_URL is defined for every web/console entry (LoadConfig / SetRequestForConsole) and
+        // namespaces the counters per install/tenant so keys never collide across workspaces.
+        $userKey = 'invites:'.BASE_URL.':user:'.$inviterId;
+        $tenantKey = 'invites:'.BASE_URL.':tenant';
+
+        if (RateLimiter::tooManyAttempts($userKey, $userLimit)
+            || RateLimiter::tooManyAttempts($tenantKey, $tenantLimit)) {
+            return true;
+        }
+
+        RateLimiter::hit($userKey, 3600);
+        RateLimiter::hit($tenantKey, 86400);
+
+        return false;
+    }
+
+    /**
+     * addUser - simple service wrapper to create a new user
+     *
+     * Role ceiling: the requested role may not exceed the caller's own role. Callers below admin
+     * (e.g. managers, who hold users.create) cannot create active accounts with a password they
+     * chose: their request is turned into an invitation, scoped to their own client. The reserved
+     * 'api' source is never accepted here (see allowedAccountSource()). A request without a
+     * password is also turned into an invitation: the user sets their own password from the
+     * invite link.
+     *
+     * TODO: Should accept userModel
+     *
+     * @param  array  $values  basic user values
+     * @return bool|int returns new user id on success, false on failure
+     *
+     * @throws AuthorizationException When the requested role is above the caller's role.
+     * @throws ValidationException When no username (email) is given.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::CREATE, global: true)]
+    public function addUser(array $values): bool|int
+    {
+        $username = trim((string) ($values['username'] ?? $values['user'] ?? ''));
+        if ($username === '') {
+            throw ValidationException::withMessages(['username' => ['A username (email) is required to create a user.']]);
+        }
+
+        $password = (string) ($values['password'] ?? '');
+
+        $values = [
+            'firstname' => NameSanitizer::clean($values['firstname'] ?? ''),
+            'lastname' => NameSanitizer::clean($values['lastname'] ?? ''),
+            'phone' => $values['phone'] ?? '',
+            'user' => $username,
+            'role' => $values['role'] ?? '',
+            'notifications' => $values['notifications'] ?? 1,
+            'clientId' => $values['clientId'] ?? '',
+            'password' => $password,
+            'source' => $this->allowedAccountSource($values['source'] ?? ''),
+            'pwReset' => $values['pwReset'] ?? '',
+            'status' => $values['status'] ?? '',
+            'createdOn' => $values['createdOn'] ?? '',
+            'jobTitle' => $values['jobTitle'] ?? '',
+            'jobLevel' => $values['jobLevel'] ?? '',
+            'department' => $values['department'] ?? '',
+        ];
+
+        $this->assertRoleAssignable($values['role']);
+
+        $mustInvite = $this->callerIsBelowAdmin() || $password === '';
+        if ($mustInvite) {
+            $invite = $this->createUserInviteWithStatus($values);
+
+            return $invite === false ? false : (int) $invite['userId'];
+        }
+
+        $newUserId = $this->userRepo->addUser($values);
+
+        if ($newUserId !== false) {
+            UserCreated::dispatch(userId: (int) $newUserId, role: (int) Roles::getRoleKey($values['role']), source: 'admin');
+        }
+
+        return $newUserId;
+    }
+
+    /**
+     * usernameExist - Checks if a given username (email) is already in the db
+     *
+     * TODO: Should accept userModel
+     *
+     * @param  string  $username  username
+     * @param  int|string  $notUserId  optional userId to skip. (used when changing email addresses to a new one, skips checking the old one)
+     * @return bool returns true or false
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function usernameExist(string $username, int|string $notUserId = ''): bool
+    {
+        return $this->userRepo->usernameExist($username, $notUserId);
+    }
+
+    /**
+     * Patch specific fields on a user record.
+     *
+     * Only admins/owners can patch other users. Regular users may only patch
+     * their own record and only non-privileged fields. Role ceiling: privileged patches may not
+     * target an account with a higher role than the caller's, nor set a role above it.
+     *
+     * @param  int  $id  The user ID
+     * @param  array  $params  The fields to update
+     *
+     * @throws AuthorizationException When the role ceiling is violated.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, entityScoped: true)]
+    public function patchUser(int $id, array $params): bool
+    {
+        $currentUserId = (int) session('userdata.id');
+
+        // Non-privileged fields that any user can update on their own profile
+        $selfPatchableFields = [
+            'firstname', 'lastname', 'phone', 'jobTitle', 'jobLevel',
+            'department', 'password', 'notifications',
+        ];
+
+        // Privileged fields that only admins/owners can set (on any user)
+        $adminPatchableFields = [
+            'firstname', 'lastname', 'phone', 'jobTitle', 'jobLevel',
+            'department', 'password', 'notifications', 'role', 'clientId',
+            'status', 'user',
+        ];
+
+        if ($this->can(UsersPermissions::EDIT, forceGlobal: true)) {
+            // users.edit holders (admin+) can patch any user at or below their own role, but
+            // only whitelisted fields
+            $filteredParams = array_intersect_key($params, array_flip($adminPatchableFields));
+
+            $this->assertUserManageable($id);
+
+            if (array_key_exists('role', $filteredParams)) {
+                $this->assertRoleAssignable($filteredParams['role']);
+            }
+        } elseif ($id === $currentUserId) {
+            // Regular users can only patch their own profile with limited fields
+            $filteredParams = array_intersect_key($params, array_flip($selfPatchableFields));
+        } else {
+            // Non-admin trying to patch another user
+            return false;
+        }
+
+        if (empty($filteredParams)) {
+            return false;
+        }
+
+        return $this->userRepo->patchUser($id, $filteredParams);
+    }
+
+    /**
+     * Returns the list of available user statuses.
+     *
+     * @return array<string, string>
+     */
+    public function getUserStatuses(): array
+    {
+        return $this->userRepo->status;
+    }
+
+    /**
+     * getUsersWithProjectAccess - gets all users who can access a project
+     *
+     * The $currentUser parameter is preserved for backwards compatibility
+     * with existing positional callers (e.g. plugins, the original
+     * Api/Controllers/Users.php call site). Default is null so RPC clients
+     * (mobile) can call by name with only $projectId and have the session
+     * user resolved server-side.
+     *
+     * Role-based authorization on $currentUser, per @marcelfolaron review:
+     *   - Not passed (null/0): use the authenticated session user
+     *   - Passed AND caller is admin/owner: honor the requested user id
+     *   - Passed by a non-admin AND differs from session: ignored and
+     *     overridden to the session user (prevents IDOR via the optional
+     *     param)
+     *
+     * Param ORDER preserved from the original signature (currentUser, projectId)
+     * so any positional callers don't have to be touched.
+     *
+     * TODO: Should return usermodel
+     *
+     * @param  int|null  $currentUser  Optional. If omitted or 0, resolves to
+     *                                 the authenticated session user.
+     * @param  int  $projectId  project id
+     * @return array returns array of users
+     *
+     * @throws BindingResolutionException
+     *
+     * @internal Not exposed via JSON-RPC (projectId is unscoped). The JSON-RPC
+     *           entry point is searchProjectUsers(), which scopes the result to
+     *           a project the caller can actually access.
+     */
+    public function getUsersWithProjectAccess(?int $currentUser = null, int $projectId = 0): array
+    {
+        // projectId is logically required — defaulting to 0 only so the
+        // optional $currentUser can sit ahead of it in the signature (PHP
+        // requires defaults at the tail). Reject the missing-projectId
+        // case explicitly here.
+        if ($projectId === 0) {
+            return [];
+        }
+
+        $sessionUser = (int) session('userdata.id');
+
+        if ($currentUser === null || $currentUser === 0) {
+            $currentUser = $sessionUser;
+        } elseif ($currentUser !== $sessionUser && ! Auth::userIsAtLeast(Roles::$admin)) {
+            $currentUser = $sessionUser;
+        }
+
+        if ($currentUser === 0) {
+            return [];
+        }
+
+        $users = [];
+
+        if ($this->projectRepository->isUserAssignedToProject($currentUser, $projectId)) {
+            $project = $this->projectRepository->getProject($projectId);
+
+            if ($project['psettings'] == 'all') {
+                return $this->getAll();
+            }
+
+            if ($project['psettings'] == 'clients') {
+                $clientUsers = $this->clientRepo->getClientsUsers($project['clientId']);
+                $projectUsers = $this->projectRepository->getUsersAssignedToProject($projectId);
+                $users = $clientUsers;
+
+                foreach ($projectUsers as $user) {
+                    $column = array_column($users, 'id');
+                    $search = array_search($user['id'], $column);
+                    if (array_search($user['id'], $column) === false) {
+                        $users[] = $user;
+                    }
+                }
+
+                return $users;
+            }
+
+            if ($project['psettings'] == 'restricted' || $project['psettings'] == '') {
+                $users = $this->projectRepository->getUsersAssignedToProject($projectId);
+
+                return $users;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Authorized JSON-RPC entry point: list users with access to a project,
+     * optionally filtered by a search query (used by the @mention autocomplete).
+     *
+     * Resolves to the current project when no id is given. Project access is
+     * enforced by getUsersWithProjectAccess() (which returns [] when the session
+     * user is not assigned to the project), so a caller cannot enumerate the
+     * users of a project they aren't part of.
+     *
+     * @param  int|null  $projectId  Project id, or null for the current project
+     * @param  string  $query  Optional case-insensitive substring filter
+     * @return array<int, array<string, mixed>> Matching users (empty when no access)
+     *
+     * @api
+     */
+    public function searchProjectUsers(?int $projectId = null, string $query = ''): array
+    {
+        $projectId = $projectId ?? (int) session('currentProject');
+
+        $users = $this->getUsersWithProjectAccess(projectId: $projectId);
+
+        if ($query === '') {
+            return $users;
+        }
+
+        return array_values(
+            array_filter($users, static fn (array $user) => stripos(implode(' ', $user), $query) !== false)
+        );
+    }
+
+    /**
+     * @internal Self-service only — invoked by saveOwnProfile() with the session user's id and
+     *           deliberately excluded from the JSON-RPC surface: it writes name/email/
+     *           notifications to $id, so exposing it would be an IDOR account takeover. The id
+     *           is pinned to the session user below as defense-in-depth.
+     */
+    public function editOwn($values, $id): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id).
+        $id = (int) session('userdata.id');
+
+        $this->userRepo->editOwn($values, $id);
+
+        // Rebuild the session from the FULL row (repo, not the stripped service
+        // getUser): setUserSession -> the session builder needs twoFASecret, or
+        // 2FA verification breaks for the user after a profile edit (#3556).
+        $user = $this->userRepo->getUser($id);
+
+        $this->authService->setUserSession($user);
+
+        self::dispatch_event('editUser', ['id' => $id, 'values' => $values]);
+    }
+
+    /**
+     * Delete the user with the specified id.
+     *
+     * @param  int  $id  The id of the user to delete.
+     * @return bool True if the user was deleted successfully, false otherwise.
+     *
+     * Role ceiling: an account whose role is above the caller's own (e.g. an owner, for an admin)
+     * cannot be deleted.
+     *
+     * @throws AuthorizationException If the caller may not delete users or the account's role is
+     *                                above the caller's.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::DELETE, entityScoped: true)]
+    public function deleteUser(int $id): bool
+    {
+        // Defense-in-depth: authorize on every call (RPC + the DelUser controller). The
+        // attribute defers (entityScoped), so this in-method check is the single source of
+        // truth and throws AuthorizationException (RPC -32001 / 403) when denied.
+        $this->authorize(UsersPermissions::DELETE, forceGlobal: true);
+        $this->assertUserManageable($id);
+
+        $this->userRepo->deleteUser($id);
+        $this->projectRepository->deleteAllProjectRelations($id);
+
+        return true;
+    }
+
+    /**
+     * Returns the list of users visible to the current session user.
+     *
+     * Admins/owners see every user. Anyone else is scoped to the users that
+     * belong to their own client. This encapsulates the role-based data
+     * scoping that previously lived in the controller.
+     *
+     * @return array<int, array<string, mixed>> Array of user rows.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getAllVisibleToUser(): array
+    {
+        if (Auth::userIsAtLeast(Roles::$admin)) {
+            return $this->getAll();
+        }
+
+        return $this->userRepo->getAllClientUsers(Auth::getUserClientId());
+    }
+
+    /**
+     * Gathers the profile + appearance/locale settings for the "edit own
+     * profile" screen, applying all of the company/default fallbacks that
+     * previously lived inline in the controller.
+     *
+     * @param  int  $userId  The id of the user whose profile is being viewed.
+     * @return array<string, mixed> Template-ready settings keyed by view variable.
+     *
+     * @throws \Exception When the user cannot be found.
+     *
+     * @api
+     */
+    public function getOwnProfileSettings(int $userId): array
+    {
+        // Self-service read: pin to the authenticated user (ignore any caller-supplied id —
+        // otherwise the RPC entry point leaks another account's profile/role/2FA status).
+        $userId = (int) session('userdata.id');
+
+        $row = $this->getUser($userId);
+
+        if ($row === false) {
+            throw new \Exception('User not found');
+        }
+
+        $userLang = $this->settingsService->getSetting('usersettings.'.$userId.'.language');
+        if (! $userLang) {
+            $userLang = $this->language->getCurrentLanguage();
+        }
+
+        $userTheme = $this->settingsService->getSetting('usersettings.'.$userId.'.theme');
+        if (! $userTheme) {
+            $userTheme = 'default';
+        }
+
+        $userColorMode = $this->settingsService->getSetting('usersettings.'.$userId.'.colorMode');
+        if (! $userColorMode) {
+            $userColorMode = 'light';
+        }
+
+        $availableColorSchemes = $this->themeCore->getAvailableColorSchemes();
+        $userColorScheme = $this->settingsService->getSetting('usersettings.'.$userId.'.colorScheme');
+        if (! $userColorScheme) {
+            $userColorScheme = isset($availableColorSchemes['companyColors']) ? 'companyColors' : 'themeDefault';
+        }
+
+        $themeFont = $this->settingsService->getSetting('usersettings.'.$userId.'.themeFont');
+        if (! $themeFont) {
+            $themeFont = 'Roboto';
+        }
+
+        $userDateFormat = $this->settingsService->getSetting('usersettings.'.$userId.'.date_format');
+        $userTimeFormat = $this->settingsService->getSetting('usersettings.'.$userId.'.time_format');
+
+        $timezone = $this->settingsService->getSetting('usersettings.'.$userId.'.timezone');
+        if (! $timezone) {
+            $timezone = app()->make(\Shiri\Core\Configuration\Environment::class)->defaultTimezone;
+        }
+
+        $messagesfrequency = $this->settingsService->getSetting('usersettings.'.$row['id'].'.messageFrequency');
+        if (! $messagesfrequency) {
+            $messagesfrequency = $this->settingsService->getSetting('companysettings.messageFrequency');
+        }
+
+        $values = [
+            'firstname' => $row['firstname'],
+            'lastname' => $row['lastname'],
+            'user' => $row['username'],
+            'phone' => $row['phone'],
+            'role' => $row['role'],
+            'jobTitle' => $row['jobTitle'],
+            'jobLevel' => $row['jobLevel'],
+            'department' => $row['department'],
+            'notifications' => $row['notifications'],
+            'twoFAEnabled' => $row['twoFAEnabled'],
+            'messagesfrequency' => $messagesfrequency,
+        ];
+
+        return [
+            'user' => $row,
+            'values' => $values,
+            'profilePic' => $this->userRepo->getProfilePicture($userId),
+            'userLang' => $userLang,
+            'userTheme' => $userTheme,
+            'themeFont' => $themeFont,
+            'userColorMode' => $userColorMode,
+            'userColorScheme' => $userColorScheme,
+            'languageList' => $this->language->getLanguageList(),
+            'dateFormat' => $userDateFormat,
+            'timeFormat' => $userTimeFormat,
+            'dateTimeValues' => $this->getSupportedDateTimeFormats(),
+            'timezone' => $timezone,
+            'availableColorSchemes' => $availableColorSchemes,
+            'availableFonts' => $this->themeCore->getAvailableFonts(),
+            'availableThemes' => $this->themeCore->getAll(),
+            'timezoneOptions' => timezone_identifiers_list(),
+        ];
+    }
+
+    /**
+     * The authenticated user's work-day schedule (workStart / lunch / workEnd
+     * hours) plus their timezone. A lean, self-scoped read for clients that
+     * only need the schedule — e.g. the mobile app seeds reminder times and the
+     * day-progress marker from it — rather than the heavy getOwnProfileSettings
+     * payload. Values are null when the user hasn't set a schedule (caller
+     * applies its own defaults).
+     *
+     * Self-scoped: always the session user, never a caller-supplied id.
+     *
+     * @api
+     *
+     * @return array{workStart: mixed, lunch: mixed, workEnd: mixed, timezone: string}
+     */
+    public function getMyDaySchedule(): array
+    {
+        $userId = (int) session('userdata.id');
+
+        // No authenticated user → don't fall through to usersettings.0.*.
+        if ($userId === 0) {
+            return [
+                'workStart' => null,
+                'lunch' => null,
+                'workEnd' => null,
+                'timezone' => app()->make(\Shiri\Core\Configuration\Environment::class)->defaultTimezone,
+            ];
+        }
+
+        $daySchedule = $this->settingsService->getSetting('usersettings.'.$userId.'.daySchedule');
+        $daySchedule = $daySchedule ? safe_unserialize($daySchedule, []) : [];
+        // safe_unserialize can yield a non-array (e.g. false for a corrupt or
+        // scalar value); normalize so the array reads below are safe.
+        if (! is_array($daySchedule)) {
+            $daySchedule = [];
+        }
+
+        $timezone = $this->settingsService->getSetting('usersettings.'.$userId.'.timezone');
+        if (! $timezone) {
+            $timezone = app()->make(\Shiri\Core\Configuration\Environment::class)->defaultTimezone;
+        }
+
+        return [
+            'workStart' => $daySchedule['workStart'] ?? null,
+            'lunch' => $daySchedule['lunch'] ?? null,
+            'workEnd' => $daySchedule['workEnd'] ?? null,
+            'timezone' => $timezone,
+        ];
+    }
+
+    /**
+     * Gathers the notification preferences for the "edit own profile" screen,
+     * applying company defaults and the per-project notification levels
+     * (including the lazy migration from the legacy muted-projects format),
+     * plus the personal webhook endpoint (webhookUrl) and its opt-in
+     * (webhookEnabled, only true while a URL is stored) and the mobile push
+     * switch (pushEnabled, on until the user switches it off).
+     *
+     * @param  int  $userId  The id of the user whose preferences are loaded.
+     * @return array<string, mixed> Template-ready notification preference data.
+     *
+     * @throws BindingResolutionException
+     *
+     * @api
+     */
+    public function getNotificationPreferences(int $userId): array
+    {
+        // Self-service read: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $enabledEventTypes = $this->settingsService->getSetting('usersettings.'.$userId.'.notificationEventTypes');
+        if (! $enabledEventTypes) {
+            $enabledEventTypes = $this->settingsService->getSetting('companysettings.defaultNotificationEventTypes');
+        }
+        if ($enabledEventTypes) {
+            $enabledEventTypes = json_decode($enabledEventTypes, true);
+        }
+        if (! is_array($enabledEventTypes)) {
+            $enabledEventTypes = Notification::getCategoryKeys();
+        }
+
+        $projectNotificationLevels = $this->loadProjectNotificationLevels($userId);
+
+        // Use the same access-aware project list as the navigation project dropdown
+        // This respects direct assignment, org-wide (psettings='all'), and client-scoped access
+        // but does NOT include the admin bypass that shows all projects unconditionally
+        $projectData = $this->projectService->getProjectHierarchyAvailableToUser($userId);
+        $userProjects = $projectData['allAvailableProjects'] ?? [];
+
+        $companyDefaultRelevance = $this->settingsService->getSetting('companysettings.defaultNotificationRelevance');
+        if (! $companyDefaultRelevance || ! Notification::isValidRelevanceLevel($companyDefaultRelevance)) {
+            $companyDefaultRelevance = Notification::RELEVANCE_ALL;
+        }
+
+        $webhook = Webhooks::decodeSetting($this->settingsService->getSetting(Webhooks::settingKey($userId)));
+
+        $pushSetting = $this->settingsService->getSetting(PushPreferences::settingKey($userId));
+        $pushEnabled = PushPreferences::isEnabled($userId, [PushPreferences::settingKey($userId) => $pushSetting]);
+
+        return [
+            'notificationCategories' => Notification::NOTIFICATION_CATEGORIES,
+            'enabledEventTypes' => $enabledEventTypes,
+            'projectNotificationLevels' => $projectNotificationLevels,
+            'companyDefaultRelevance' => $companyDefaultRelevance,
+            'relevanceLevels' => Notification::RELEVANCE_LEVELS,
+            'userProjects' => $userProjects,
+            'webhookUrl' => $webhook['url'],
+            'webhookEnabled' => $webhook['enabled'],
+            'pushEnabled' => $pushEnabled,
+        ];
+    }
+
+    /**
+     * Updates the current user's basic profile information (name, phone,
+     * username/email). Validates the email and, when the email changed,
+     * ensures it is not already taken.
+     *
+     * Returns a status code the controller maps to a notification:
+     *   - 'success'        profile saved
+     *   - 'user_exists'    new email already belongs to another account
+     *   - 'no_valid_email' email is not a valid address
+     *   - 'enter_email'    email was empty
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input (firstname, lastname, user, phone).
+     * @return string Status code described above.
+     *
+     * @api
+     */
+    public function saveOwnProfile(int $userId, array $post): string
+    {
+        // Self-service: pin to the authenticated user; ignore any caller-supplied id so the RPC
+        // entry point cannot edit another account (IDOR). EditOwn already passes the session id.
+        $userId = (int) session('userdata.id');
+
+        $row = $this->getUser($userId);
+
+        $values = [
+            'firstname' => NameSanitizer::clean(($post['firstname']) ?? $row['firstname']),
+            'lastname' => NameSanitizer::clean(($post['lastname']) ?? $row['lastname']),
+            'user' => ($post['user']) ?? $row['username'],
+            'phone' => ($post['phone']) ?? $row['phone'],
+            'notifications' => $row['notifications'],
+            'twoFAEnabled' => $row['twoFAEnabled'],
+        ];
+
+        if ($values['user'] === '') {
+            return 'enter_email';
+        }
+
+        if (! filter_var($values['user'], FILTER_VALIDATE_EMAIL)) {
+            return 'no_valid_email';
+        }
+
+        $changedEmail = $row['username'] !== $values['user'];
+
+        if ($changedEmail && $this->usernameExist($values['user'], $userId) !== false) {
+            return 'user_exists';
+        }
+
+        $this->editOwn($values, $userId);
+
+        return 'success';
+    }
+
+    /**
+     * Changes the current user's password after validating the current
+     * password, the confirmation match, and the strength requirements.
+     *
+     * Returns a status code the controller maps to a notification:
+     *   - 'success'                    password changed
+     *   - 'password_not_strong_enough' new password failed strength check
+     *   - 'passwords_dont_match'       new and confirmation differed
+     *   - 'previous_password_incorrect' current password was wrong
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  string  $currentPassword  The user's current password.
+     * @param  string  $newPassword  The desired new password.
+     * @param  string  $confirmPassword  Confirmation of the new password.
+     * @return string Status code described above.
+     *
+     * @api
+     */
+    public function changeOwnPassword(int $userId, string $currentPassword, string $newPassword, string $confirmPassword): string
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — otherwise
+        // the RPC entry point is a current-password oracle / takeover vector against any account).
+        $userId = (int) session('userdata.id');
+
+        // Read from the repository, not the service getUser: the latter strips
+        // the password hash (and other secrets) for API safety (#3556), but the
+        // current-password check needs the real hash.
+        $row = $this->userRepo->getUser($userId);
+
+        if (! password_verify($currentPassword, $row['password'])) {
+            return 'previous_password_incorrect';
+        }
+
+        if ($newPassword !== $confirmPassword) {
+            return 'passwords_dont_match';
+        }
+
+        if (! $this->checkPasswordStrength($newPassword)) {
+            return 'password_not_strong_enough';
+        }
+
+        $values = [
+            'firstname' => $row['firstname'],
+            'lastname' => $row['lastname'],
+            'user' => $row['username'],
+            'phone' => $row['phone'],
+            'password' => $newPassword,
+            'notifications' => $row['notifications'],
+            'twoFAEnabled' => $row['twoFAEnabled'],
+        ];
+
+        $this->userRepo->editOwn($values, $userId);
+
+        return 'success';
+    }
+
+    /**
+     * Persists the current user's appearance (theme) settings and applies the
+     * matching theme/cache side effects so the change takes effect immediately.
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input (theme, colormode, colorscheme, themeFont).
+     *
+     * @api
+     */
+    public function saveOwnAppearanceSettings(int $userId, array $post): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $postTheme = htmlentities($post['theme'] ?? 'default');
+        $postColorMode = htmlentities($post['colormode'] ?? 'light');
+        $postColorScheme = htmlentities($post['colorscheme'] ?? 'themeDefault');
+        $themeFont = htmlentities($post['themeFont'] ?? '');
+
+        $previousAppearance = [
+            (string) $this->settingsService->getSetting('usersettings.'.$userId.'.theme', ''),
+            (string) $this->settingsService->getSetting('usersettings.'.$userId.'.colorMode', ''),
+            (string) $this->settingsService->getSetting('usersettings.'.$userId.'.colorScheme', ''),
+            (string) $this->settingsService->getSetting('usersettings.'.$userId.'.themeFont', ''),
+        ];
+
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.theme', $postTheme);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.colorMode', $postColorMode);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.colorScheme', $postColorScheme);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.themeFont', $themeFont);
+
+        $this->themeCore::clearCache();
+        $this->themeCore->setActive($postTheme);
+        $this->themeCore->setColorMode($postColorMode);
+        $this->themeCore->setColorScheme($postColorScheme);
+        $this->themeCore->setFont($themeFont);
+
+        if ($previousAppearance !== [$postTheme, $postColorMode, $postColorScheme, $themeFont]) {
+            AppearanceUpdated::dispatch(
+                userId: $userId,
+                theme: $postTheme,
+                colorMode: $postColorMode,
+                colorScheme: $postColorScheme,
+                font: $themeFont,
+            );
+        }
+    }
+
+    /**
+     * Persists the current user's locale settings (language, date/time
+     * formats, timezone) and applies the session + language side effects so
+     * the change takes effect on the next request.
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input (language, date_format, time_format, timezone).
+     *
+     * @api
+     */
+    public function saveOwnLocaleSettings(int $userId, array $post): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $postLang = htmlentities($post['language'] ?? '');
+        $dateFormat = htmlentities($post['date_format'] ?? '');
+        $timeFormat = htmlentities($post['time_format'] ?? '');
+        $tz = htmlentities($post['timezone'] ?? '');
+
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.language', $postLang);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.date_format', $dateFormat);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.time_format', $timeFormat);
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.timezone', $tz);
+
+        session()->forget('cache.language_resources_'.$this->language->getCurrentLanguage());
+
+        session(['usersettings.date_format' => $dateFormat]);
+        session(['usersettings.time_format' => $timeFormat]);
+        session(['usersettings.timezone' => $tz]);
+
+        // Clear the localization cache so middleware re-fetches on next request
+        session()->forget('localization.cached');
+
+        $this->language->setLanguage($postLang);
+    }
+
+    /**
+     * Persists the current user's notification preferences: the email
+     * notifications toggle, message frequency, the enabled event-type
+     * categories (validated against the known category keys) and the
+     * per-project notification levels (validated against the known relevance
+     * levels). Cleans up the legacy muted-projects format when present.
+     *
+     * The mobile push switch (pushNotifications, any boolean-ish value) is saved
+     * only when the key is present; a missing key leaves it as it was.
+     *
+     * The personal webhook is saved separately, with saveOwnWebhookSettings().
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input.
+     *
+     * @api
+     */
+    public function saveOwnNotificationPreferences(int $userId, array $post): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $row = $this->getUser($userId);
+
+        $values = [
+            'firstname' => $row['firstname'],
+            'lastname' => $row['lastname'],
+            'user' => $row['username'],
+            'phone' => $row['phone'],
+            'notifications' => isset($post['notifications']) ? 1 : 0,
+            'twoFAEnabled' => $row['twoFAEnabled'],
+        ];
+
+        $this->userRepo->editOwn($values, $userId);
+
+        // Storing option messagefrequency
+        $this->settingsService->saveSetting('usersettings.'.$userId.'.messageFrequency', (int) ($post['messagesfrequency'] ?? 3600));
+
+        // The push switch is its own channel setting. Unlike the email checkbox, a missing key
+        // leaves it unchanged, so clients that predate the switch never turn it off by omission;
+        // the web form posts a hidden '0' under the checkbox to say "off" explicitly.
+        if (array_key_exists('pushNotifications', $post)) {
+            $pushEnabled = filter_var($post['pushNotifications'], FILTER_VALIDATE_BOOLEAN);
+            $this->settingsService->saveSetting(PushPreferences::settingKey($userId), $pushEnabled ? '1' : '0');
+        }
+
+        // Save event-type preferences
+        $enabledEventTypes = $post['enabledEventTypes'] ?? [];
+        if (! is_array($enabledEventTypes)) {
+            $enabledEventTypes = [];
+        }
+        $validCategories = array_keys(Notification::NOTIFICATION_CATEGORIES);
+        $enabledEventTypes = array_values(array_intersect($enabledEventTypes, $validCategories));
+        $this->settingsService->saveSetting(
+            'usersettings.'.$userId.'.notificationEventTypes',
+            json_encode($enabledEventTypes)
+        );
+
+        // Save per-project notification levels
+        $projectLevels = $post['projectNotificationLevel'] ?? [];
+        if (! is_array($projectLevels)) {
+            $projectLevels = [];
+        }
+        $validatedLevels = [];
+        foreach ($projectLevels as $projectId => $level) {
+            if (Notification::isValidRelevanceLevel($level)) {
+                $validatedLevels[(int) $projectId] = $level;
+            }
+        }
+        $this->settingsService->saveSetting(
+            'usersettings.'.$userId.'.projectNotificationLevels',
+            json_encode($validatedLevels)
+        );
+
+        // Clean up old format if it exists
+        $oldSetting = $this->settingsService->getSetting('usersettings.'.$userId.'.projectMutedNotifications');
+        if ($oldSetting !== false && $oldSetting !== null) {
+            $this->settingsService->saveSetting(
+                'usersettings.'.$userId.'.projectMutedNotifications',
+                ''
+            );
+        }
+    }
+
+    /**
+     * Stores the current user's personal webhook: webhookUrl (https only,
+     * validated before anything is written) and the webhookEnabled checkbox.
+     * An empty or missing URL disables the webhook; unchecking the box keeps the URL on
+     * file. Both go into one setting (Webhooks::settingKey()), which is read
+     * back when the write reports no change, so a failed save never leaves an
+     * old URL or opt-in live behind a success message.
+     *
+     * A missing webhookEnabled means unchecked, so API clients that change
+     * only the opt-in must send the current URL as well.
+     *
+     * @param  int  $userId  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input.
+     *
+     * @throws ValidationException When webhookUrl is not an acceptable endpoint; nothing is saved.
+     * @throws WebhookSettingNotSavedException When the webhook setting could not be persisted.
+     *
+     * @api
+     */
+    public function saveOwnWebhookSettings(int $userId, array $post): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        // A cleared field arrives as null (ConvertEmptyStringsToNull), so null clears the webhook too.
+        $rawWebhookUrl = $post['webhookUrl'] ?? '';
+        $webhookUrl = is_string($rawWebhookUrl) ? trim($rawWebhookUrl) : null;
+        if ($webhookUrl === null || ($webhookUrl !== '' && ! Webhooks::isValidEndpointUrl($webhookUrl))) {
+            throw ValidationException::withMessages(['webhookUrl' => ['notification.invalid_webhook_url']]);
+        }
+        $webhookEnabled = $webhookUrl !== '' && filter_var($post['webhookEnabled'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        $webhookSettingKey = Webhooks::settingKey($userId);
+        $webhookSetting = Webhooks::encodeSetting($webhookUrl, $webhookEnabled);
+        $webhookSaveException = null;
+        try {
+            // updateOrInsert also reports false when the row already held this exact value, so a
+            // false result only counts as a failure when reading the setting back shows otherwise.
+            $webhookSaved = $this->settingsService->saveSetting($webhookSettingKey, $webhookSetting)
+                || $this->settingsService->getSetting($webhookSettingKey) === $webhookSetting;
+        } catch (\Throwable $e) {
+            $webhookSaved = false;
+            $webhookSaveException = get_class($e);
+        }
+
+        if (! $webhookSaved) {
+            // Class name only: the setting value and DB exception messages carry the URL and its secret.
+            Log::error('Personal webhook setting could not be saved', ['userId' => $userId, 'exception' => $webhookSaveException]);
+
+            throw new WebhookSettingNotSavedException;
+        }
+    }
+
+    /**
+     * Returns the list of supported varying date-time formats used by the
+     * profile settings screen.
+     *
+     * @link https://www.php.net/manual/en/class.datetimeinterface.php#datetimeinterface.constants.types
+     *
+     * @return array<string, array<int, string>> Format groups keyed by 'dates'/'times'.
+     */
+    public function getSupportedDateTimeFormats(): array
+    {
+        return [
+            'dates' => [
+                $this->language->__('language.dateformat'),
+                'Y-m-d',
+                'D, d M y',
+                'l, d-M-y',
+                'd.m.Y',
+                'd/m/Y',
+                'd. F Y',
+                'm-d-Y',
+                'dmY',
+                'F d, Y',
+                'd F Y',
+            ],
+            'times' => [
+                $this->language->__('language.timeformat'),
+                'H:i P',
+                'H:i O',
+                'H:i T',
+                'H:i:s',
+                'H:i',
+            ],
+        ];
+    }
+
+    /**
+     * Loads per-project notification levels for the given user.
+     *
+     * Performs lazy migration from the old binary mute format
+     * (projectMutedNotifications: JSON array of project IDs)
+     * to the new three-level format
+     * (projectNotificationLevels: JSON map of projectId -> relevance level).
+     *
+     * @param  int  $userId  The id of the user whose levels are loaded.
+     * @return array<int, string> Map of project ID to relevance level.
+     */
+    private function loadProjectNotificationLevels(int $userId): array
+    {
+        $newSetting = $this->settingsService->getSetting('usersettings.'.$userId.'.projectNotificationLevels');
+        if ($newSetting) {
+            $decoded = json_decode($newSetting, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        // Lazy migration: convert old muted-projects array to new format
+        $oldSetting = $this->settingsService->getSetting('usersettings.'.$userId.'.projectMutedNotifications');
+        if ($oldSetting) {
+            $mutedIds = json_decode($oldSetting, true);
+            if (is_array($mutedIds) && count($mutedIds) > 0) {
+                $migrated = [];
+                foreach ($mutedIds as $projectId) {
+                    $migrated[(int) $projectId] = Notification::RELEVANCE_MUTED;
+                }
+                // Save in new format
+                $this->settingsService->saveSetting(
+                    'usersettings.'.$userId.'.projectNotificationLevels',
+                    json_encode($migrated)
+                );
+                // Clear old format
+                $this->settingsService->saveSetting(
+                    'usersettings.'.$userId.'.projectMutedNotifications',
+                    ''
+                );
+
+                return $migrated;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Validates a user-update payload for the admin "edit user" screen.
+     *
+     * Returns a status code the controller maps to a notification:
+     *   - 'valid'                  the update may proceed
+     *   - 'passwords_dont_match'   username/email was empty (legacy key)
+     *   - 'enter_email'            password and confirmation differed (legacy key)
+     *   - 'no_valid_email'         email is not a valid address
+     *   - 'user_exists'            new email already belongs to another account
+     *
+     * Note: the notification keys above intentionally mirror the original
+     * controller behavior to preserve identical messaging.
+     *
+     * @param  array<string, mixed>  $values  Shaped values for the update.
+     * @param  array<string, mixed>  $row  The current stored user row.
+     * @param  int  $id  The id of the user being edited.
+     * @param  array<string, mixed>  $post  Raw request input (for password comparison).
+     * @return string Status code described above.
+     */
+    public function validateUserUpdate(array $values, array $row, int $id, array $post): string
+    {
+        if ($values['user'] === '') {
+            return 'passwords_dont_match';
+        }
+
+        if (isset($post['password']) && $post['password'] != ($post['password2'] ?? null)) {
+            return 'enter_email';
+        }
+
+        if (! filter_var($values['user'], FILTER_VALIDATE_EMAIL)) {
+            return 'no_valid_email';
+        }
+
+        if ($row['username'] != $values['user'] && $this->usernameExist($row['username'], $id)) {
+            return 'user_exists';
+        }
+
+        return 'valid';
+    }
+
+    /**
+     * Updates a user (admin edit screen) and reconciles their project
+     * relations based on the posted project list.
+     *
+     * @param  array<string, mixed>  $values  Shaped values for the update.
+     * @param  int  $id  The id of the user being edited.
+     * @param  array<int, mixed>|null  $projects  Posted project ids, or null when none submitted.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, global: true)]
+    public function updateUser(array $values, int $id, ?array $projects): void
+    {
+        $this->editUser($values, $id);
+        $this->reconcileProjectRelations($id, $projects);
+    }
+
+    /**
+     * Reconciles a user's project relations from a posted project list.
+     *
+     * When no projects are posted, or the sentinel value '0' is the first
+     * entry, all relations are removed; otherwise the posted set is saved.
+     *
+     * @param  int  $userId  The id of the user.
+     * @param  array<int, mixed>|null  $projects  Posted project ids, or null when none submitted.
+     */
+    private function reconcileProjectRelations(int $userId, ?array $projects): void
+    {
+        if (is_array($projects) && isset($projects[0]) && $projects[0] !== '0') {
+            $this->projectService->editUserProjectRelations($userId, $projects);
+
+            return;
+        }
+
+        $this->projectService->deleteAllUserProjectRelations($userId);
+    }
+
+    /**
+     * Returns the flat list of project ids a user is assigned to.
+     *
+     * @param  int  $userId  The id of the user.
+     * @return array<int, mixed> The project ids.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::VIEW, global: true)]
+    public function getUserProjectIds(int $userId): array
+    {
+        $projects = $this->projectService->getUserProjectRelation($userId);
+        $projectIds = [];
+
+        foreach ($projects as $project) {
+            $projectIds[] = $project['projectId'];
+        }
+
+        return $projectIds;
+    }
+
+    /**
+     * Resends an invitation to a pending user.
+     *
+     * Enforces a 240 second rate-limit (per user, via the session), generates
+     * a password-reset/invite code when the user does not yet have one, and
+     * sends the invitation email.
+     *
+     * Returns a status code the controller maps to a notification:
+     *   - 'sent'             invitation sent
+     *   - 'too_soon'         another invite was sent within the 240s resend cooldown
+     *   - 'too_many_invites' the hourly/daily invite cap was reached
+     *   - 'invite_email_failed' the invitation email could not be sent
+     *
+     * @param  int  $id  The id of the user to re-invite.
+     * @param  array<string, mixed>  $row  The current stored user row.
+     * @return string Status code described above.
+     *
+     * @throws BindingResolutionException
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::EDIT, global: true)]
+    public function resendUserInvite(int $id, array $row): string
+    {
+        if (session()->exists('lastInvite.'.$id) && session('lastInvite.'.$id) >= time() - 240) {
+            return 'too_soon';
+        }
+
+        if ($this->invitesRateLimited()) {
+            return 'too_many_invites';
+        }
+
+        session(['lastInvite.'.$id => time()]);
+
+        $pwReset = $row['pwReset'] ?? '';
+        if (empty($pwReset)) {
+            $pwReset = Uuid::uuid4()->toString();
+            $this->patchUser($id, ['pwReset' => $pwReset]);
+        }
+
+        $emailSent = $this->sendUserInvite(
+            inviteCode: $pwReset,
+            user: $row['username']
+        );
+
+        if ($emailSent) {
+            InviteSent::dispatch(userId: $id);
+        }
+
+        return $emailSent ? 'sent' : 'invite_email_failed';
+    }
+
+    /**
+     * Invites a brand new user from the admin "new user" screen.
+     *
+     * Owns the values shaping (including the manager client-id decision), the
+     * email/username validation, the invite creation, and the project-relation
+     * reconciliation.
+     *
+     * Returns a status code the controller maps to a notification:
+     *   - 'success'        user invited
+     *   - 'enter_email'    email was empty
+     *   - 'no_valid_email' email is not a valid address
+     *   - 'user_exists'    email already belongs to another account
+     *   - 'role_not_allowed' the requested role is above the inviting user's own role
+     *   - 'invite_failed'  invite could not be created (rate limit reached OR db failure — the
+     *                      two are indistinguishable here, so the mapped message stays generic)
+     *   - 'invite_email_failed' the user was created but the invitation email could not be sent
+     *
+     * @param  array<string, mixed>  $post  Raw request input.
+     * @param  int|string|null  $sessionClientId  The session user's client id (used for managers).
+     * @param  bool  $isManager  Whether the inviting user holds the manager role.
+     * @return string Status code described above.
+     *
+     * @throws BindingResolutionException
+     *
+     * @internal Not exposed over JSON-RPC: the manager flag and client id are supplied by the
+     *           NewUser controller from the session. The role ceiling is enforced here (and in
+     *           createUserInviteWithStatus()).
+     */
+    #[RequiresPermission(UsersPermissions::CREATE, global: true)]
+    public function inviteNewUser(array $post, int|string|null $sessionClientId, bool $isManager): string
+    {
+        $values = [
+            'firstname' => NameSanitizer::clean($post['firstname'] ?? ''),
+            'lastname' => NameSanitizer::clean($post['lastname'] ?? ''),
+            'user' => $post['user'] ?? '',
+            'phone' => $post['phone'] ?? '',
+            'role' => $post['role'] ?? '',
+            'password' => '',
+            'pwReset' => '',
+            'status' => '',
+            'jobTitle' => $post['jobTitle'] ?? '',
+            'jobLevel' => $post['jobLevel'] ?? '',
+            'department' => $post['department'] ?? '',
+            'clientId' => $isManager ? $sessionClientId : ($post['client'] ?? ''),
+        ];
+
+        if ($values['user'] === '') {
+            return 'enter_email';
+        }
+
+        if (! filter_var($values['user'], FILTER_VALIDATE_EMAIL)) {
+            return 'no_valid_email';
+        }
+
+        if (! $this->roleCeiling()->canAssign($values['role'])) {
+            return 'role_not_allowed';
+        }
+
+        if ($this->usernameExist($values['user'])) {
+            return 'user_exists';
+        }
+
+        $invite = $this->createUserInviteWithStatus($values);
+
+        if ($invite === false) {
+            return 'invite_failed';
+        }
+
+        $projects = $post['projects'] ?? null;
+        if (is_array($projects) && count($projects) > 0) {
+            $this->reconcileProjectRelations((int) $invite['userId'], $projects);
+        }
+
+        // The user exists either way; only report full success if the invitation email left.
+        return $invite['emailSent'] ? 'success' : 'invite_email_failed';
+    }
+
+    /**
+     * Connects/binds to LDAP and returns the directory members for the import
+     * dialog. Returns false when the bind fails.
+     *
+     * @param  string  $bindUsername  The directory username to bind with.
+     * @param  string  $password  The password to bind with.
+     * @return array<int, array<string, mixed>>|false Directory members, or false on failed bind.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::IMPORT, global: true)]
+    public function fetchLdapMembers(string $bindUsername, string $password): array|false
+    {
+        $ldapService = app()->make(LdapService::class);
+        $ldapService->connect();
+
+        if (! $ldapService->bind($bindUsername, $password)) {
+            return false;
+        }
+
+        return $ldapService->getAllMembers() ?: [];
+    }
+
+    /**
+     * Imports/updates the LDAP users selected from the staged member list.
+     *
+     * @param  array<int, array<string, mixed>>  $stagedUsers  The full staged member list.
+     * @param  array<int, string>  $selectedUsernames  The `user` values (emails) the admin selected for import.
+     *
+     * @throws AuthorizationException When a selected user's role, or the role of the existing
+     *                                account it would update, is above the caller's role.
+     *
+     * @api
+     */
+    #[RequiresPermission(UsersPermissions::IMPORT, global: true)]
+    public function importSelectedLdapUsers(array $stagedUsers, array $selectedUsernames): void
+    {
+        $users = [];
+        foreach ($stagedUsers as $user) {
+            // Staged rows come from Ldap::getSingleUser(); the import dialog posts each row's `user`
+            // (the email) as the selection value.
+            $email = $user['user'] ?? null;
+            if (is_string($email) && in_array($email, $selectedUsernames, true)) {
+                $users[] = $user;
+            }
+        }
+
+        // Role ceiling, checked for the whole batch before anything is written: the imported role
+        // and the existing account it would update (matched the same way upsertUsers() does).
+        foreach ($users as $user) {
+            $this->assertRoleAssignable($user['role'] ?? '');
+
+            $existingUser = $this->userRepo->getUserByEmail((string) $user['user']);
+            if (is_array($existingUser)) {
+                $this->assertRoleAssignable($existingUser['role'] ?? '');
+            }
+        }
+
+        app()->make(LdapService::class)->upsertUsers($users);
+    }
+
+    /**
+     * The roles the current user may assign (their own role and below), for role dropdowns.
+     *
+     * @return array<int, string> Role names keyed by role level.
+     *
+     * @api
+     */
+    public function getAssignableRoles(): array
+    {
+        return $this->roleCeiling()->assignableRoles();
+    }
+
+    /**
+     * Role ceiling: throws unless the current user may assign $role (at or below their own role).
+     *
+     * @param  mixed  $role  Requested role key or name.
+     *
+     * @throws AuthorizationException
+     */
+    private function assertRoleAssignable(mixed $role): void
+    {
+        if ($this->roleCeiling()->canAssign($role)) {
+            return;
+        }
+
+        throw new AuthorizationException('You cannot assign a role higher than your own.');
+    }
+
+    /**
+     * Role ceiling: throws when the account $userId currently holds a role above the caller's, so
+     * e.g. an admin cannot edit (and take over) an owner account. Unknown ids pass; the update
+     * itself then affects nothing.
+     *
+     * @param  int  $userId  The account being modified.
+     *
+     * @throws AuthorizationException
+     */
+    private function assertUserManageable(int $userId): void
+    {
+        $targetUser = $this->userRepo->getUser($userId);
+
+        if (! is_array($targetUser)) {
+            return;
+        }
+
+        if ($this->roleCeiling()->canAssign($targetUser['role'] ?? '')) {
+            return;
+        }
+
+        throw new AuthorizationException('You cannot edit a user with a higher role than your own.');
+    }
+
+    /**
+     * The account `source` a caller may set when creating a user. 'api' is reserved for API keys
+     * (created through the Api service only) because it makes the account authenticate as a
+     * service account. Callers below admin cannot set a source at all.
+     *
+     * @param  mixed  $requestedSource  Caller-supplied source.
+     * @return string The source to store.
+     */
+    private function allowedAccountSource(mixed $requestedSource): string
+    {
+        if (! is_string($requestedSource) || strtolower(trim($requestedSource)) === 'api') {
+            return '';
+        }
+
+        if ($this->callerIsBelowAdmin()) {
+            return '';
+        }
+
+        return $requestedSource;
+    }
+
+    /**
+     * Whether an authenticated caller ranks below admin (e.g. a manager holding users.create).
+     */
+    private function callerIsBelowAdmin(): bool
+    {
+        return $this->roleCeiling()->callerIsBelow(Roles::$admin);
+    }
+
+    /**
+     * The shared role ceiling policy.
+     */
+    private function roleCeiling(): RoleCeiling
+    {
+        return app(RoleCeiling::class);
+    }
+}

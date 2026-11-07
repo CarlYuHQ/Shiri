@@ -1,0 +1,200 @@
+@extends($layout)
+
+@section('content')
+
+
+    <x-auth::onboardingProgress current="time" />
+
+
+    <h2>🗓️ {{ __('headlines.onboarding_daily_flow') }}</h2>
+    <p>{{ __('text.onboarding_times_help_prioritize') }}</p>
+
+<div class="regcontent">
+
+    <form id="resetPassword" action="" method="post">
+
+        <input type="hidden" name="step" value="4"/>
+
+        {{  $tpl->displayInlineNotification() }}
+
+        <x-global::forms.label>{{ __('label.onboarding_work_start') }}</x-global::forms.label>
+        <div class="">
+            <x-global::selectable selected="{{ $daySchedule['workStart'] == '8' ? 'true' : 'false' }}" :id="'daySchedule-workStart-1'" :name="'daySchedule-workStart-button'" :value="'8'" :label="''" onclick="jQuery('#daySchedule-workStart').val('8').hide(); jQuery('#daySchedule-workStart-3').show();" class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[8]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[8]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="{{ $daySchedule['workStart'] == '10' ? 'true' : 'false' }}" :id="'daySchedule-workStart-2'" :name="'daySchedule-workStart-button'" :value="'10'" :label="''" onclick="jQuery('#daySchedule-workStart').val('10').hide(); jQuery('#daySchedule-workStart-3').show(); " class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[10]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[10]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="" :id="'daySchedule-workStart-3'" :name="'daySchedule-workStart-button'" :value="''" :label="''" class="compact" onclick="jQuery(this).hide(); jQuery('#daySchedule-workStart').show()">
+                <x-global::forms.label for="">
+                    <i class="fa fa-clock"></i> {{ __('label.select_my_own_time') }}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::forms.select name="daySchedule-workStart" id="daySchedule-workStart" style="display:none; vertical-align: top;">
+                @foreach($dayHourOptions as $key => $value)
+                    <option value="{{ $key }}">
+                        {{ format($value['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($value['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                    </option>
+                @endforeach
+            </x-global::forms.select>
+        </div>
+        <br />
+        <x-global::forms.label>{{ __('label.onboarding_lunch_break') }}</x-global::forms.label>
+        <div class="">
+            <x-global::selectable selected="{{ $daySchedule['lunch'] == '12' ? 'true' : 'false' }}" :id="'daySchedule-lunch-1'" :name="'daySchedule-lunch-button'" :value="'12'" :label="''" onclick="jQuery('#daySchedule-lunch').val('12').hide(); jQuery('#daySchedule-lunch-3').show();" class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[12]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[12]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="{{ $daySchedule['lunch'] == '14' ? 'true' : 'false' }}" :id="'daySchedule-lunch-2'" :name="'daySchedule-lunch-button'" :value="'14'" :label="''" onclick="jQuery('#daySchedule-lunch').val('14').hide(); jQuery('#daySchedule-lunch-3').show();" class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[14]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[14]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="" :id="'daySchedule-lunch-3'" :name="'daySchedule-lunch-button'" :value="''" :label="''" class="compact" onclick="jQuery(this).hide(); jQuery('#daySchedule-lunch').show()">
+                <x-global::forms.label for="">
+                    <i class="fa fa-clock"></i> {{ __('label.select_my_own_time') }}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::forms.select name="daySchedule-lunch" id="daySchedule-lunch" style="display:none; vertical-align: top;">
+                @foreach($dayHourOptions as $key => $value)
+                    <option value="{{ $key }}">
+                        {{ format($value['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($value['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                    </option>
+                @endforeach
+            </x-global::forms.select>
+        </div>
+        <br />
+        <x-global::forms.label>{{ __('label.onboarding_work_end') }} 🥳</x-global::forms.label>
+
+        <div class="">
+            <x-global::selectable selected="{{ $daySchedule['workEnd'] == '16' ? 'true' : 'false' }}" :id="'daySchedule-workEnd-1'" :name="'daySchedule-workEnd-button'" :value="'16'" :label="''" onclick="jQuery('#daySchedule-workEnd').val('16').hide(); jQuery('#daySchedule-workEnd-3').show();" class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[16]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[16]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="{{ $daySchedule['workEnd'] == '18' ? 'true' : 'false' }}" :id="'daySchedule-workEnd-2'" :name="'daySchedule-workEnd-button'" :value="'18'" :label="''" onclick="jQuery('#daySchedule-workEnd').val('18').hide(); jQuery('#daySchedule-workEnd-3').show();" class="compact">
+                <x-global::forms.label for="">
+                    {{ format($dayHourOptions[18]['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($dayHourOptions[18]['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::selectable selected="" :id="'daySchedule-workEnd-3'" :name="'daySchedule-workEnd-button'" :value="''" :label="''" class="compact" onclick="jQuery(this).hide(); jQuery('#daySchedule-workEnd').show()">
+                <x-global::forms.label for="">
+                    <i class="fa fa-clock"></i> {{ __('label.select_my_own_time') }}
+                </x-global::forms.label>
+            </x-global::selectable>
+            <x-global::forms.select name="daySchedule-workEnd" id="daySchedule-workEnd" style="display:none; vertical-align: top;">
+                @foreach($dayHourOptions as $key => $value)
+                    <option value="{{ $key }}">
+                        {{ format($value['start'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time() }} - {{  format($value['end'], null, \Shiri\Core\Support\FromFormat::User24hTime)->time()}}
+                    </option>
+                @endforeach
+            </x-global::forms.select>
+        </div>
+
+        {{--        <div class="tw-flex">--}}
+{{--            @foreach([1,2,3,4,5,6,7] as $dayOfWeekIso)--}}
+{{--                <x-global::selectable type="checkbox" class="circle" selected="{{ isset($workdays[$dayOfWeekIso]) ? 'true' : '' }}" :id="'dayOfWeek-'.$dayOfWeekIso" :name="'dayOfWeek-'.$dayOfWeekIso" :value="$dayOfWeekIso" :label="''" onclick="showTimeForm({{$dayOfWeekIso}})">--}}
+{{--                    <x-global::forms.label for="dayOfWeek-{{ $dayOfWeekIso }}">--}}
+{{--                        {{ substr(__('dates.day_of_week_iso-'.$dayOfWeekIso), 0, 2) }}--}}
+{{--                    </x-global::forms.label>--}}
+{{--                </x-global::selectable>--}}
+{{--            @endforeach--}}
+{{--        </div>--}}
+{{--        <div>--}}
+{{--            @foreach([1,2,3,4,5,6,7] as $dayOfWeekIso)--}}
+{{--                <div class="dayOfWeekInputs dayOfWeekInput-{{$dayOfWeekIso}} {{ isset($workdays[$dayOfWeekIso]) ? 'tw-flex' : 'tw-hidden' }}">--}}
+{{--                    <div class="tw-w-1/4 tw-leading-[32px]">--}}
+{{--                        {{ __('dates.day_of_week_iso-'.$dayOfWeekIso) }}--}}
+{{--                    </div>--}}
+{{--                    <div class="tw-w-1/4">--}}
+{{--                        <input type="time" class="dayStart" name="dayOfWeek-{{$dayOfWeekIso}}-start" value='{{  isset($workdays[$dayOfWeekIso]) ? $workdays[$dayOfWeekIso]['start'] : '09:00'}}' step="1800"/>--}}
+{{--                    </div>--}}
+{{--                    <div class="tw-px-2 tw-leading-[32px]">to</div>--}}
+{{--                    <div class="tw-w-1/4">--}}
+{{--                        <input type="time" class="dayEnd" name="dayOfWeek-{{$dayOfWeekIso}}-end" value='{{  isset($workdays[$dayOfWeekIso]) ? $workdays[$dayOfWeekIso]['end'] : '17:00'}}' step="1800"/>--}}
+{{--                    </div>--}}
+{{--                    <div class="tw-w tw-leading-[32px] tw-pl-2 applyBox">--}}
+{{--                        @if($loop->index == 0)--}}
+{{--                            <a href="javascript:void(0)">Apply to all</a>--}}
+{{--                        @endif--}}
+{{--                    </div>--}}
+{{--                </div>--}}
+{{--            @endforeach--}}
+
+
+{{--        </div>--}}
+        <br /> <br />
+        <div class="tw-text-right">
+            <x-global::forms.button tag="a" link="{{BASE_URL}}/auth/userInvite/{{$inviteId}}?step=3" contentRole="tertiary" style="width:auto; margin-right:10px">{{ __('buttons.back') }}</x-global::forms.button>
+            <input type="submit" name="createAccount" class="tw-w-auto" style="width:auto" value="<?php echo $tpl->language->__("buttons.next"); ?>" />
+        </div>
+
+    </form>
+
+</div>
+
+<script>
+    function applyToAllClick() {
+        jQuery('.dayOfWeekInputs').each(function() {
+
+            let linkParentContainer = jQuery(this);
+
+            jQuery(this).find('.applyBox a').click(function() {
+                let startInput = jQuery(linkParentContainer).find("input.dayStart").val();
+                let endInput = jQuery(linkParentContainer).find("input.dayEnd").val();
+
+                jQuery('.dayOfWeekInputs input.dayStart').val(startInput);
+                jQuery('.dayOfWeekInputs input.dayEnd').val(endInput);
+            });
+        })
+    }
+
+    jQuery(document).ready(function() {
+        applyToAllClick();
+
+        var timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+        jQuery("#timezone").val(timezone);
+
+        var now=new Date(2010,11,31);
+        var str=now.toLocaleDateString();
+
+
+
+        str=str.replace("31","dd");
+        str=str.replace("12","mm");
+        str=str.replace("2010","yyyy");
+
+    })
+
+    function showTimeForm($id) {
+        let isVisible = jQuery('.dayOfWeekInput-'+$id).hasClass("tw-flex");
+        if(isVisible) {
+            jQuery('.dayOfWeekInput-'+$id).removeClass("tw-flex");
+            jQuery('.dayOfWeekInput-'+$id).addClass("tw-hidden");
+        }else{
+            jQuery('.dayOfWeekInput-'+$id).addClass("tw-flex");
+            jQuery('.dayOfWeekInput-'+$id).removeClass("tw-hidden");
+        }
+
+        jQuery('.dayOfWeekInputs').find('.applyBox').html("");
+        jQuery('.dayOfWeekInputs.tw-flex').each(function(index){
+
+            if(index == 0) {
+                jQuery(this).find('.applyBox').html("<a href='javascript:void(0);'>Apply to all")
+            }else{
+                jQuery(this).find('.applyBox').html();
+            }
+        });
+
+        applyToAllClick();
+
+        }
+</script>
+
+@endsection

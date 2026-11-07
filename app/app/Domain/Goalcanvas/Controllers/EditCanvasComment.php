@@ -1,0 +1,288 @@
+<?php
+
+/**
+ * editCanvasComment class - Generic canvas controller / Edit Comments
+ */
+
+namespace Shiri\Domain\Goalcanvas\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Domain\Comments\Repositories\Comments as CommentRepository;
+use Shiri\Domain\Comments\Services\Comments as CommentService;
+use Shiri\Domain\Goalcanvas\Permissions\GoalcanvasPermissions;
+use Shiri\Domain\Goalcanvas\Services\Goalcanvas as GoalcanvaService;
+use Shiri\Domain\Notifications\Models\Notification as NotificationModel;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+
+class EditCanvasComment extends Controller
+{
+    /**
+     * Constant that must be redefined
+     */
+    protected const CANVAS_NAME = 'goal';
+
+    private CommentRepository $commentsRepo;
+
+    private ProjectService $projectService;
+
+    private GoalcanvaService $goalService;
+
+    private object $canvasRepo;
+
+    /**
+     * init - initialize private variables
+     */
+    public function init(
+        CommentRepository $commentsRepo,
+        ProjectService $projectService,
+        GoalcanvaService $goalService
+    ) {
+        $this->commentsRepo = $commentsRepo;
+        $this->projectService = $projectService;
+        $this->goalService = $goalService;
+
+        $repoName = app()->getNamespace().'Domain\\goalcanvas\\Repositories\\goalcanvas';
+        $this->canvasRepo = app()->make($repoName);
+    }
+
+    /**
+     * get - handle get requests
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, entityScoped: true)]
+    public function get($params)
+    {
+
+        $canvasTypes = $this->canvasRepo->getCanvasTypes();
+        if (isset($params['id'])) {
+            // Resolve + VIEW-authorize the item against its real project first.
+            $canvasItem = $this->goalService->getGoalItem((int) $params['id']);
+            if (! $canvasItem) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $comments = $this->commentsRepo->getComments(static::CANVAS_NAME.'canvasitem', $canvasItem['id']);
+            $this->tpl->assign('numComments', $this->commentsRepo->countComments(static::CANVAS_NAME.'canvasitem', $canvasItem['id']));
+        } else {
+            if (isset($params['type'])) {
+                $type = strip_tags($params['type']);
+            } else {
+                $type = array_key_first($canvasTypes);
+            }
+
+            $canvasItem = [
+                'id' => '',
+                'box' => $type,
+                'description' => '',
+                'status' => array_key_first($this->canvasRepo->getStatusLabels()),
+                'relates' => array_key_first($this->canvasRepo->getRelatesLabels()),
+                'assumptions' => '',
+                'data' => '',
+                'conclusion' => '',
+                'milestoneHeadline' => '',
+                'milestoneId' => '',
+            ];
+
+            $comments = [];
+        }
+
+        $this->tpl->assign('comments', $comments);
+
+        $this->tpl->assign('canvasTypes', $canvasTypes);
+        $this->tpl->assign('canvasItem', $canvasItem);
+
+        return $this->tpl->displayPartial(static::CANVAS_NAME.'canvas.canvasComment');
+    }
+
+    /**
+     * post - handle post requests
+     */
+    #[RequiresPermission(GoalcanvasPermissions::EDIT, entityScoped: true)]
+    public function post($params)
+    {
+        // Delete comment (POST only: it changes data) — only when it belongs to THIS gated
+        // item (module + moduleId).
+        if (isset($_POST['delComment']) && isset($params['id'])) {
+            $canvasItem = $this->goalService->getGoalItem((int) $params['id']);
+            if (! $canvasItem) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $commentId = (int) ($_POST['delComment']);
+            $comment = $this->commentsRepo->getComment($commentId);
+            if ($comment !== false
+                && (string) $comment['module'] === static::CANVAS_NAME.'canvasitem'
+                && (int) $comment['moduleId'] === (int) $canvasItem['id']) {
+                // Through the service: author-or-moderator check on top of the item binding.
+                if (app()->make(CommentService::class)->deleteComment($commentId)) {
+                    $this->tpl->setNotification($this->language->__('notifications.comment_deleted'), 'success', strtoupper(static::CANVAS_NAME).'canvascomment_deleted');
+                }
+            }
+
+            return Frontcontroller::redirect(BASE_URL.'/'.static::CANVAS_NAME.'canvas/editCanvasComment/'.(int) $canvasItem['id']);
+        }
+
+        if (isset($params['changeItem'])) {
+            if (isset($params['itemId']) && $params['itemId'] != '') {
+                if (isset($params['description']) && ! empty($params['description'])) {
+                    $currentCanvasId = (int) session('current'.strtoupper(static::CANVAS_NAME).'Canvas');
+
+                    $canvasItem = [
+                        'box' => $params['box'],
+                        'author' => session('userdata.id'),
+                        'description' => $params['description'],
+                        'status' => $params['status'],
+                        'relates' => $params['relates'],
+                        'assumptions' => $params['assumptions'],
+                        'data' => $params['data'],
+                        'conclusion' => $params['conclusion'],
+                        'itemId' => $params['itemId'],
+                        'id' => $params['itemId'],
+                        'canvasId' => $currentCanvasId,
+                        'milestoneId' => $params['milestoneId'],
+                        'dependentMilstone' => '',
+                    ];
+
+                    // Resolves the item's real project from itemId and authorizes EDIT there.
+                    $this->goalService->updateGoalItem($canvasItem);
+
+                    $comments = $this->commentsRepo->getComments(static::CANVAS_NAME.'canvasitem', $params['itemId']);
+                    $this->tpl->assign('numComments', $this->commentsRepo->countComments(
+                        static::CANVAS_NAME.'canvasitem',
+                        $params['itemId']
+                    ));
+                    $this->tpl->assign('comments', $comments);
+
+                    $this->tpl->setNotification($this->language->__('notifications.canvas_item_updates'), 'success', strtoupper(static::CANVAS_NAME).'canvasitem_updated');
+
+                    $notification = app()->make(NotificationModel::class);
+                    $notification->url = [
+                        'url' => BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.(int) $params['itemId'],
+                        'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+                    ];
+                    $notification->entity = $canvasItem;
+                    $notification->module = static::CANVAS_NAME.'canvas';
+                    $notification->action = 'updated';
+                    $notification->projectId = session('currentProject');
+                    $notification->subject = $this->language->__('email_notifications.canvas_board_edited');
+                    $notification->authorId = session('userdata.id');
+                    $notification->message = sprintf(
+                        $this->language->__('email_notifications.canvas_item_update_message'),
+                        session('userdata.name'),
+                        $canvasItem['description']
+                    );
+
+                    $this->projectService->notifyProjectUsers($notification);
+
+                    return Frontcontroller::redirect(BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.$params['itemId']);
+                } else {
+                    $this->tpl->setNotification($this->language->__('notification.please_enter_title'), 'error');
+                }
+            } else {
+                if (isset($_POST['description']) && ! empty($_POST['description'])) {
+                    $currentCanvasId = (int) session('current'.strtoupper(static::CANVAS_NAME).'Canvas');
+
+                    $canvasItem = [
+                        'box' => $params['box'],
+                        'author' => session('userdata.id'),
+                        'description' => $params['description'],
+                        'status' => $params['status'],
+                        'relates' => $params['relates'],
+                        'assumptions' => $params['assumptions'],
+                        'data' => $params['data'],
+                        'conclusion' => $params['conclusion'],
+                        'canvasId' => $currentCanvasId,
+                    ];
+
+                    // Resolves the target board's real project from canvasId and authorizes CREATE.
+                    $id = $this->goalService->createGoalItem($canvasItem);
+
+                    $canvasItem['id'] = $id;
+
+                    $canvasTypes = $this->canvasRepo->getCanvasTypes();
+
+                    $this->tpl->setNotification(sprintf($this->language->__('notification.canvas_item_created'), $this->language->__($canvasTypes[$params['box']]['title'] ?? $params['box'])), 'success', strtoupper(static::CANVAS_NAME).'canvasitem_created');
+
+                    $notification = app()->make(NotificationModel::class);
+                    $notification->url = [
+                        'url' => BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.(int) $params['itemId'],
+                        'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+                    ];
+                    $notification->entity = $canvasItem;
+                    $notification->module = static::CANVAS_NAME.'canvas';
+                    $notification->action = 'created';
+                    $notification->projectId = session('currentProject');
+                    $notification->subject = $this->language->__('email_notifications.canvas_board_item_created');
+                    $notification->authorId = session('userdata.id');
+                    $notification->message = sprintf(
+                        $this->language->__('email_notifications.canvas_item_created_message'),
+                        session('userdata.name'),
+                        $canvasItem['description']
+                    );
+
+                    $this->projectService->notifyProjectUsers($notification);
+
+                    $this->tpl->setNotification($this->language->__('notification.element_created'), 'success', strtoupper(static::CANVAS_NAME).'canvasitem_created');
+
+                    return Frontcontroller::redirect(BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.$id);
+                } else {
+                    $this->tpl->setNotification($this->language->__('notification.please_enter_title'), 'error');
+                }
+            }
+        }
+
+        if (isset($params['comment']) === true) {
+            // Only allow commenting on a goal item the user can view in their project.
+            if (! $this->goalService->getGoalItem((int) ($_GET['id'] ?? 0))) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $values = [
+                'text' => $params['text'],
+                'date' => dtHelper()->dbNow()->formatDateTimeForDb(),
+                'userId' => (session('userdata.id')),
+                'moduleId' => $_GET['id'],
+                'commentParent' => ($params['father']),
+            ];
+
+            $message = $this->commentsRepo->addComment($values, static::CANVAS_NAME.'canvasitem');
+            $this->tpl->setNotification($this->language->__('notifications.comment_create_success'), 'success', strtoupper(static::CANVAS_NAME).'canvasitemcomment_created');
+
+            $notification = app()->make(NotificationModel::class);
+            $notification->url = [
+                'url' => BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.(int) $_GET['id'],
+                'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+            ];
+            $notification->entity = $values;
+            $notification->module = static::CANVAS_NAME.'canvas';
+            $notification->action = 'commented';
+            $notification->projectId = session('currentProject');
+            $notification->subject = $this->language->__('email_notifications.canvas_board_comment_created');
+            $notification->authorId = session('userdata.id');
+            $notification->message = sprintf(
+                $this->language->__('email_notifications.canvas_item__comment_created_message'),
+                session('userdata.name')
+            );
+
+            $this->projectService->notifyProjectUsers($notification);
+
+            return Frontcontroller::redirect(BASE_URL.'/'.static::CANVAS_NAME.'canvas'.'/editCanvasComment/'.$_GET['id']);
+        }
+
+        $this->tpl->assign('canvasTypes', $this->canvasRepo->getCanvasTypes());
+        $this->tpl->assign('canvasItem', $this->goalService->getGoalItem((int) ($_GET['id'] ?? 0)));
+
+        return $this->tpl->displayPartial(static::CANVAS_NAME.'canvas.canvasComment');
+    }
+
+    /**
+     * put - handle put requests
+     */
+    public function put($params) {}
+
+    /**
+     * delete - handle delete requests
+     */
+    public function delete($params) {}
+}

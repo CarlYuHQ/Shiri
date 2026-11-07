@@ -1,0 +1,111 @@
+<?php
+
+namespace Shiri\Domain\Setting\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\UI\Theme;
+use Shiri\Domain\Api\Services\Api as ApiService;
+use Shiri\Domain\Notifications\Models\Notification;
+use Shiri\Domain\Notifications\Services\Push as PushService;
+use Shiri\Domain\Setting\Permissions\SettingPermissions;
+use Shiri\Domain\Setting\Services\Setting as SettingService;
+
+class EditCompanySettings extends Controller
+{
+    private ApiService $APIService;
+
+    private SettingService $settingsSvc;
+
+    private Theme $theme;
+
+    private PushService $pushService;
+
+    /**
+     * init - initialize private variables
+     */
+    public function init(
+        ApiService $APIService,
+        SettingService $settingsSvc,
+        Theme $theme,
+        PushService $pushService,
+    ): void {
+        $this->APIService = $APIService;
+        $this->settingsSvc = $settingsSvc;
+        $this->theme = $theme;
+        $this->pushService = $pushService;
+    }
+
+    /**
+     * get - handle get requests
+     */
+    #[RequiresPermission(SettingPermissions::COMPANY_VIEW, global: true)]
+    public function get($params)
+    {
+        if (isset($_GET['resetLogo'])) {
+            // Resetting the logo is a WRITE, so it must require edit — not the view that gates
+            // this GET handler. Matters once view/edit are split to different roles in the admin
+            // UI (the seeded matrix grants both to admin+owner, so this is defense-in-depth).
+            if (! can('company.settings.edit')) {
+                return $this->tpl->display('errors.error403', responseCode: 403);
+            }
+
+            $this->settingsSvc->resetLogo();
+
+            return Frontcontroller::redirect(BASE_URL.'/setting/editCompanySettings#look');
+        }
+
+        $companySettingsView = $this->settingsSvc->getCompanySettings($this->theme->getLogoUrl());
+
+        $apiKeys = $this->APIService->getAPIKeys();
+
+        $this->tpl->assign('apiKeys', $apiKeys);
+        $this->tpl->assign('languageList', $this->language->getLanguageList());
+        $this->tpl->assign('companySettings', $companySettingsView['companySettings']);
+        $this->tpl->assign('notificationCategories', Notification::NOTIFICATION_CATEGORIES);
+        $this->tpl->assign('defaultNotificationTypes', $companySettingsView['defaultNotificationTypes']);
+        $this->tpl->assign('defaultRelevance', $companySettingsView['defaultRelevance']);
+        $this->tpl->assign('pushRelayEnabled', $companySettingsView['pushRelayEnabled']);
+        $this->tpl->assign('pushRelayContent', $companySettingsView['pushRelayContent']);
+        // The relay only applies where Firebase isn't configured directly (self-hosted).
+        $this->tpl->assign('pushDirectConfigured', $this->pushService->sendPath() === 'direct');
+        $this->tpl->assign('relevanceLevels', [
+            Notification::RELEVANCE_ALL => 'label.notifications_all_activity',
+            Notification::RELEVANCE_MY_WORK => 'label.notifications_my_work',
+        ]);
+
+        return $this->tpl->display('setting.editCompanySettings');
+    }
+
+    /**
+     * post - handle post requests
+     */
+    #[RequiresPermission(SettingPermissions::COMPANY_EDIT, global: true)]
+    public function post($params)
+    {
+        // An unchecked checkbox posts nothing, so the form sends a marker when the telemetry
+        // toggle was rendered; only then does a missing value mean "opted out".
+        if (isset($_POST['telemetryToggleShown'])) {
+            $params['telemetryActive'] = isset($_POST['telemetryActive']);
+        }
+
+        $saved = $this->settingsSvc->saveCompanySettings($params);
+
+        if ($saved) {
+            $this->tpl->setNotification($this->language->__('notifications.company_settings_edited_successfully'), 'success');
+        }
+
+        return Frontcontroller::redirect(BASE_URL.'/setting/editCompanySettings');
+    }
+
+    /**
+     * put - handle put requests
+     */
+    public function put($params) {}
+
+    /**
+     * delete - handle delete requests
+     */
+    public function delete($params) {}
+}

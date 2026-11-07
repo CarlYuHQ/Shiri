@@ -1,0 +1,211 @@
+@php
+    $canvasName = $canvasName ?? '';
+    $currentCanvas = $currentCanvas ?? '';
+    $canvasItem = $canvasItem ?? ['id' => '', 'box' => '', 'description' => '', 'status' => '', 'relates' => '', 'milestoneId' => '', 'milestoneHeadline' => ''];
+    $canvasTypes = $canvasTypes ?? [];
+    $hiddenStatusLabels = $statusLabels ?? [];
+    $statusLabels = $statusLabels ?? [];
+    $hiddenRelatesLabels = $relatesLabels ?? [];
+    $relatesLabels = $relatesLabels ?? [];
+    $dataLabels = $dataLabels ?? [1 => ['active' => false, 'field' => '', 'title' => ''], 2 => ['active' => false, 'field' => '', 'title' => ''], 3 => ['active' => false, 'field' => '', 'title' => '']];
+    $milestones = $milestones ?? [];
+    $users = $users ?? [];
+    $searchCriteria = $searchCriteria ?? [];
+
+    $id = '';
+    if (isset($canvasItem['id']) && $canvasItem['id'] != '') {
+        $id = $canvasItem['id'];
+    }
+@endphp
+
+<script type="text/javascript">
+    window.onload = function() {
+        if (!window.jQuery) {
+            //It's not a modal
+            location.href="{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas?showModal={{ $canvasItem['id'] }}";
+        }
+    }
+</script>
+
+<div class="" style="width:900px;">
+
+    <x-global::actions.modal-header>
+    <x-slot:title><i class="fas {{ $canvasTypes[$canvasItem['box']]['icon'] }}"></i> {{ $canvasTypes[$canvasItem['box']]['title'] }}</x-slot:title>
+    @if ($id != '')
+        <x-slot:actions>
+            <li><a href="#/{{ $canvasName }}canvas/delCanvasItem/{{ $id }}" class="delete"><i class="fa fa-trash-can"></i> {!! __('links.delete') !!}</a></li>
+        </x-slot:actions>
+    @endif
+</x-global::actions.modal-header>
+    {!! $tpl->displayNotification() !!}
+
+    <form class="formModal" method="post" action="{{ BASE_URL }}/{{ $canvasName }}canvas/editCanvasItem/{{ $id }}">
+
+        <input type="hidden" value="{{ $currentCanvas }}" name="canvasId" />
+        <input type="hidden" value="{{ $canvasItem['box'] }}" name="box" id="box"/>
+        <input type="hidden" value="{{ $id }}" name="itemId" id="itemId"/>
+
+        {{-- The item's `description` column is its title; the long text is the data field below. --}}
+        <x-global::forms.label for="canvasItemTitle">{!! __('label.title') !!}</x-global::forms.label>
+        <x-global::forms.text-input name="description" id="canvasItemTitle" value="{{ $canvasItem['description'] }}" width="full" /><br />
+
+        @if(! empty($statusLabels))
+            <x-global::forms.label>{!! __('label.status') !!}</x-global::forms.label>
+            <x-global::forms.select name="status" style="width: 50%" id="statusCanvas" enhanced :search="false">
+                @foreach($statusLabels as $key => $data)
+                    @if($data['active'])
+                        <x-global::forms.select.option :value="$key" :selected="$canvasItem['status'] == $key" icon="fas {{ $data['icon'] }}">{{ $data['title'] }}</x-global::forms.select.option>
+                    @endif
+                @endforeach
+            </x-global::forms.select><br />
+        @else
+            <input type="hidden" name="status" value="{{ $canvasItem['status'] ?? array_key_first($hiddenStatusLabels) }}" />
+        @endif
+
+        @if(! empty($relatesLabels))
+            <x-global::forms.label>{!! __('label.relates') !!}</x-global::forms.label>
+            <x-global::forms.select name="relates" style="width: 50%" id="relatesCanvas" enhanced :search="false">
+                @foreach($relatesLabels as $key => $data)
+                    @if($data['active'])
+                        <x-global::forms.select.option :value="$key" :selected="$canvasItem['relates'] == $key" icon="fas {{ $data['icon'] }}">{{ $data['title'] }}</x-global::forms.select.option>
+                    @endif
+                @endforeach
+            </x-global::forms.select><br />
+        @else
+            <input type="hidden" name="relates" value="{{ $canvasItem['relates'] ?? array_key_first($hiddenRelatesLabels) }}" />
+        @endif
+
+        @if($dataLabels[1]['active'])
+            <x-global::forms.label>{!! __($dataLabels[1]['title']) !!}</x-global::forms.label>
+            @if(isset($dataLabels[1]['type']) && $dataLabels[1]['type'] == 'int')
+                <x-global::forms.text-input type="number" name="{{ $dataLabels[1]['field'] }}" value="{{ $canvasItem[$dataLabels[1]['field']] }}" /><br />
+            @elseif(isset($dataLabels[1]['type']) && $dataLabels[1]['type'] == 'string')
+                <x-global::forms.text-input name="{{ $dataLabels[1]['field'] }}" value="{{ $canvasItem[$dataLabels[1]['field']] }}" style="width:100%" /><br />
+            @else
+                <textarea style="width:100%" rows="3" cols="10" name="{{ $dataLabels[1]['field'] }}" class="modalTextArea tiptapSimple">{{ $canvasItem[$dataLabels[1]['field']] }}</textarea><br />
+            @endif
+        @else
+            <input type="hidden" name="{{ $dataLabels[1]['field'] }}" value="" />
+        @endif
+
+        @if($dataLabels[2]['active'])
+            <x-global::forms.label>{!! __($dataLabels[2]['title']) !!}</x-global::forms.label>
+            @if(isset($dataLabels[2]['type']) && $dataLabels[2]['type'] == 'int')
+                <x-global::forms.text-input type="number" name="{{ $dataLabels[2]['field'] }}" value="{{ $canvasItem[$dataLabels[2]['field']] }}" /><br />
+            @elseif(isset($dataLabels[2]['type']) && $dataLabels[2]['type'] == 'string')
+                <x-global::forms.text-input name="{{ $dataLabels[2]['field'] }}" value="{{ $canvasItem[$dataLabels[2]['field']] }}" style="width:100%" /><br />
+            @else
+                <textarea style="width:100%" rows="3" cols="10" name="{{ $dataLabels[2]['field'] }}" class="modalTextArea tiptapSimple">{{ $canvasItem[$dataLabels[2]['field']] }}</textarea><br />
+            @endif
+        @else
+            <input type="hidden" name="{{ $dataLabels[2]['field'] }}" value="" />
+        @endif
+
+        @if($dataLabels[3]['active'])
+            <x-global::forms.label>{!! __($dataLabels[3]['title']) !!}</x-global::forms.label>
+            @if(isset($dataLabels[3]['type']) && $dataLabels[3]['type'] == 'int')
+                <x-global::forms.text-input type="number" name="{{ $dataLabels[3]['field'] }}" value="{{ $canvasItem[$dataLabels[3]['field']] }}" /><br />
+            @elseif(isset($dataLabels[3]['type']) && $dataLabels[3]['type'] == 'string')
+                <x-global::forms.text-input name="{{ $dataLabels[3]['field'] }}" value="{{ $canvasItem[$dataLabels[3]['field']] }}" /><br />
+            @else
+                <textarea style="width:100%" rows="3" cols="10" name="{{ $dataLabels[3]['field'] }}" class="modalTextArea tiptapSimple">{{ $canvasItem[$dataLabels[3]['field']] }}</textarea><br />
+            @endif
+        @else
+            <input type="hidden" name="{{ $dataLabels[3]['field'] }}" value="" />
+        @endif
+
+        <input type="hidden" name="milestoneId" value="{{ $canvasItem['milestoneId'] }}" />
+        <input type="hidden" name="changeItem" value="1" />
+
+
+        @if($login::userIsAtLeast($roles::$editor))
+            <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.save')" id="primaryCanvasSubmitButton" />
+            <x-global::forms.button inputType="submit" contentRole="secondary" value="closeModal" id="saveAndClose" onclick="shiri.{{ $canvasName }}CanvasController.setCloseModal();">{!! __('buttons.save_and_close') !!}</x-global::forms.button>
+        @endif
+
+        @if($id !== '')
+            <br /><br />
+            <x-global::elements.section-header icon="fa fa-link">{!! __('headlines.linked_milestone') !!} <x-global::elements.info-tip :text="__('tooltip.link_milestones_tooltip')" /></x-global::elements.section-header>
+
+            @if($canvasItem['milestoneId'] == '')
+                <center>
+                    <h4>{!! __('headlines.no_milestone_link') !!}</h4>
+
+                    <div class="row" id="milestoneSelectors">
+                        @if($login::userIsAtLeast($roles::$editor))
+                            <div class="col-md-12">
+                                <a href="javascript:void(0);" onclick="shiri.{{ $canvasName }}CanvasController.toggleMilestoneSelectors('new');">{!! __('links.create_link_milestone') !!}</a>
+                                @if(count($milestones) > 0)
+                                    | <a href="javascript:void(0);" onclick="shiri.{{ $canvasName }}CanvasController.toggleMilestoneSelectors('existing');">{!! __('links.link_existing_milestone') !!}</a>
+                                @endif
+                            </div>
+                        @endif
+                    </div>
+                    <div class="row" id="newMilestone" style="display:none;">
+                        <div class="col-md-12">
+                            <x-global::forms.text-input width="50%" name="newMilestone" /><br />
+                            <input type="hidden" name="type" value="milestone" />
+                            <input type="hidden" name="{{ $canvasName }}canvasitemid" value="{{ $id }} " />
+                            <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.save')" onclick="jQuery('#primaryCanvasSubmitButton').click()" contentRole="primary" />
+                            <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.cancel')" onclick="shiri.{{ $canvasName }}CanvasController.toggleMilestoneSelectors('hide')" contentRole="tertiary" />
+                        </div>
+                    </div>
+
+                    <div class="row" id="existingMilestone" style="display:none;">
+                        <div class="col-md-12">
+                            <x-global::forms.select data-placeholder="{{ __('input.placeholders.filter_by_milestone') }}" name="existingMilestone" class="user-select">
+                                <option value=""></option>
+                                @foreach($milestones as $milestoneRow)
+                                    <option value="{{ $milestoneRow->id }}"
+                                        @if(isset($searchCriteria['milestone']) && $searchCriteria['milestone'] == $milestoneRow->id) selected='selected' @endif
+                                    >{{ $milestoneRow->headline }}</option>
+                                @endforeach
+                            </x-global::forms.select>
+                            <input type="hidden" name="type" value="milestone" />
+                            <input type="hidden" name="{{ $canvasName }}canvasitemid" value="{{ $id }} " />
+                            <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.save')" onclick="jQuery('#primaryCanvasSubmitButton').click()" contentRole="primary" />
+                            <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.cancel')" onclick="shiri.{{ $canvasName }}CanvasController.toggleMilestoneSelectors('hide')" contentRole="tertiary" />
+                        </div>
+                    </div>
+                </center>
+            @else
+                <div hx-trigger="load"
+                     hx-indicator=".htmx-indicator"
+                     hx-get="{{ BASE_URL }}/hx/tickets/milestones/showCard?milestoneId={{ $canvasItem['milestoneId'] }}">
+                    <div class="htmx-indicator">
+                        {!! __('label.loading_milestone') !!}
+                    </div>
+                </div>
+                <x-global::forms.button tag="a" link="javascript:void(0);" data-post-field="removeMilestone" data-post-value="{{ $canvasItem['milestoneId'] }}" class="delete" state="danger" variant="outline"><i class="fa fa-close"></i> {!! __('links.remove') !!}</x-global::forms.button>
+            @endif
+        @endif
+
+    </form>
+
+    @if($id !== '')
+        <br />
+        <input type="hidden" name="comment" value="1" />
+        <x-global::elements.section-header icon="fa fa-comments">{!! __('subtitles.discussion') !!}</x-global::elements.section-header>
+        @include('comments::submodules.generalComment', ['formUrl' => '/' . $canvasName . 'canvas/editCanvasItem/' . $id])
+    @endif
+</div>
+
+<script type="text/javascript">
+    jQuery(document).ready(function(){
+
+
+
+        if (window.shiri && window.shiri.tiptapController) {
+            shiri.tiptapController.initSimpleEditor();
+        }
+
+        @if(! $login::userIsAtLeast($roles::$editor))
+            shiri.authController.makeInputReadonly(".nyroModalCont");
+        @endif
+
+        @if($login::userHasRole([$roles::$commenter]))
+            shiri.commentsController.enableCommenterForms();
+        @endif
+
+    })
+</script>

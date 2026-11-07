@@ -1,0 +1,246 @@
+@extends($layout)
+
+@section('content')
+
+@php
+    $milestones = $milestones ?? [];
+    // The calendar's last view (saved by the view select via Api.Api.setSubmenuState).
+    $projectCalendarView = app(\Shiri\Core\UI\UiState::class)->get('myProjectCalendarView', 'dayGridMonth');
+@endphp
+
+{!! $tpl->displayNotification() !!}
+
+@include('tickets::submodules.timelineHeader')
+
+<div class="maincontent">
+    @include('tickets::submodules.timelineTabs')
+    <x-global::layout.content-box>
+
+        {{-- New / Filter moved into the nav bar (timelineTabs). The month
+             title and the FullCalendar prev/next controls remain here. --}}
+        <div class="row">
+            {{-- Empty leading column keeps the month title optically centered on
+                 the page: it is centered WITHIN its column, so it needs the
+                 middle third, not the left half. --}}
+            <div class="col-md-4"></div>
+            <div class="col-md-4">
+                <div class="fc-center center" id="calendarTitle" style="padding-top:5px;">
+                    <h2>..</h2>
+                </div>
+            </div>
+            <div class="col-md-4">
+
+                <button class="fc-next-button btn btn-default right" type="button" style="margin-right:5px;">
+                    <span class="fc-icon fc-icon-chevron-right"></span>
+                </button>
+                <button class="fc-prev-button btn btn-default right" type="button" style="margin-right:5px;">
+                    <span class="fc-icon fc-icon-chevron-left"></span>
+                </button>
+
+                <button class="fc-today-button btn btn-default right" style="margin-right:5px;">{{ __('label.today_lowercase') }}</button>
+
+
+                <x-global::forms.select id="my-select" width="sm" style="margin-right:5px;" class="right">
+                    <option class="fc-timeGridDay-button fc-button fc-state-default fc-corner-right" value="timeGridDay" {{ $projectCalendarView == 'timeGridDay' ? 'selected' : '' }}>{{ __('buttons.day', 'Day') }}</option>
+                    <option class="fc-timeGridWeek-button fc-button fc-state-default fc-corner-right" value="timeGridWeek" {{ $projectCalendarView == 'timeGridWeek' ? 'selected' : '' }}>{{ __('buttons.week', 'Week') }}</option>
+                    <option class="fc-dayGridMonth-button fc-button fc-state-default fc-corner-right" value="dayGridMonth" {{ $projectCalendarView == 'dayGridMonth' ? 'selected' : '' }}>{{ __('buttons.month', 'Month') }}</option>
+                    <option class="fc-multiMonthYear-button fc-button fc-state-default fc-corner-right" value="multiMonthYear" {{ $projectCalendarView == 'multiMonthYear' ? 'selected' : '' }}>{{ __('label.year', 'Year') }}</option>
+                </x-global::forms.select>
+
+            </div>
+
+        </div>
+        <div class="calendar-wrapper">
+            <div id="calendar"></div>
+        </div>
+
+    </x-global::layout.content-box>
+</div>
+
+@once @push('scripts')
+<script type="text/javascript">
+
+    jQuery(document).ready(function(){
+
+
+    @if (isset($_GET['showMilestoneModal']))
+        @php
+            $modalUrl = $_GET['showMilestoneModal'] == '' ? '' : '/'.(int) $_GET['showMilestoneModal'];
+        @endphp
+
+        shiri.ticketsController.openMilestoneModalManually("{{ BASE_URL }}/tickets/editMilestone{{ $modalUrl }}");
+        window.history.pushState({},document.title, '{{ BASE_URL }}/tickets/roadmap');
+
+    @endif
+
+
+});
+
+
+    var events = [
+        @foreach ($milestones as $mlst)
+            @php
+                $headline = __('label.'.strtolower($mlst->type)).': '.$mlst->headline;
+                if ($mlst->type == 'milestone') {
+                    $headline .= ' ('.$mlst->percentDone.'% Done)';
+                }
+
+                $color = '#8D99A6';
+                if ($mlst->type == 'milestone') {
+                    $color = $mlst->tags;
+                }
+
+                $sortIndex = 0;
+                if ($mlst->sortIndex != '' && is_numeric($mlst->sortIndex)) {
+                    $sortIndex = $mlst->sortIndex;
+                }
+
+                $dependencyList = [];
+                if ($mlst->milestoneid != 0) {
+                    $dependencyList[] = $mlst->milestoneid;
+                }
+
+                if ($mlst->dependingTicketId != 0) {
+                    $dependencyList[] = $mlst->dependingTicketId;
+                }
+            @endphp
+
+        {
+
+            title: @json($headline),
+
+            @if (dtHelper()->isValidDateString($mlst->dateToFinish))
+                start: new Date({{ format($mlst->dateToFinish)->jsTimestamp() }}),
+                end: new Date({{ format(dtHelper()->parseDbDateTime($mlst->dateToFinish)->addHour(1))->jsTimestamp() }}),
+            @elseif (dtHelper()->isValidDateString($mlst->editFrom))
+                start: new Date({{ format($mlst->editFrom)->jsTimestamp() }}),
+                end: new Date({{ format($mlst->editTo)->jsTimestamp() }}),
+            @endif
+
+
+            enitityId: {{ $mlst->id }},
+            @if ($mlst->type == 'milestone')
+            url: '#/tickets/editMilestone/{{ $mlst->id }}',
+            color: '{{ $color }}',
+            enitityType: "milestone",
+            allDay: true,
+            @else
+            url: '#/tickets/showTicket/{{ $mlst->id }}',
+            color: '{{ $color }}',
+            enitityType: "ticket",
+            allDay: false,
+            @endif
+
+        },
+        @endforeach
+    ];
+
+
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const heightWindow = jQuery("body").height() - 190;
+
+        const calendarEl = document.getElementById('calendar');
+
+        const calendar = new FullCalendar.Calendar(calendarEl, {
+                timeZone: shiri.i18n.__("usersettings.timezone"),
+                height:heightWindow,
+                initialView: '{{ $projectCalendarView }}',
+                events: events,
+                editable: true,
+                headerToolbar: false,
+                dayHeaderFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "luxon"),
+                eventTimeFormat: shiri.dateHelper.getFormatFromSettings("timeformat", "luxon"),
+                slotLabelFormat: shiri.dateHelper.getFormatFromSettings("timeformat", "luxon"),
+                views: {
+                    timeGridDay: {
+
+                    },
+                    timeGridWeek: {
+
+                    },
+                    dayGridMonth: {
+                        dayHeaderFormat: { weekday: 'short' },
+                    },
+                    multiMonthYear: {
+                        showNonCurrentDates: true,
+                        multiMonthTitleFormat: { month: 'long', year: 'numeric' },
+                        dayHeaderFormat: { weekday: 'short' },
+                    }
+                },
+                nowIndicator: true,
+                bootstrapFontAwesome: {
+                    close: 'fa-times',
+                    prev: 'fa-chevron-left',
+                    next: 'fa-chevron-right',
+                    prevYear: 'fa-angle-double-left',
+                    nextYear: 'fa-angle-double-right'
+                },
+                eventDrop: function (event) {
+
+                    shiri.rpc('Tickets.Tickets.patchTicket', {
+                        id: event.event.extendedProps.enitityId,
+                        values: {
+                            editFrom: event.event.startStr,
+                            editTo: event.event.endStr
+                        }
+                    }).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        event.revert();
+                        console.error('Could not update ticket dates', error);
+                    });
+                },
+                eventResize: function (event) {
+
+                    shiri.rpc('Tickets.Tickets.patchTicket', {
+                        id: event.event.extendedProps.enitityId,
+                        values: {
+                            editFrom: event.event.startStr,
+                            editTo: event.event.endStr
+                        }
+                    }).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        event.revert();
+                        console.error('Could not update ticket dates', error);
+                    })
+
+                },
+                eventMouseEnter: function() {
+                }
+            }
+        );
+        calendar.setOption('locale', shiri.i18n.__("language.code"));
+        calendar.render();
+        calendar.scrollToTime( 100 );
+        jQuery("#calendarTitle h2").text(calendar.getCurrentData().viewTitle);
+
+        jQuery('.fc-prev-button').click(function() {
+            calendar.prev();
+            calendar.getCurrentData()
+            jQuery("#calendarTitle h2").text(calendar.getCurrentData().viewTitle);
+        });
+        jQuery('.fc-next-button').click(function() {
+            calendar.next();
+            jQuery("#calendarTitle h2").text(calendar.getCurrentData().viewTitle);
+        });
+        jQuery('.fc-today-button').click(function() {
+            calendar.today();
+            jQuery("#calendarTitle h2").text(calendar.getCurrentData().viewTitle);
+        });
+        jQuery("#my-select").on("change", function(e){
+
+            calendar.changeView(jQuery("#my-select option:selected").val());
+
+            shiri.rpc('Api.Api.setSubmenuState', {
+                submenu: "myProjectCalendarView",
+                state: jQuery("#my-select option:selected").val()
+            }).catch(function (e) { console.error('Could not update submenu state', e); });
+
+        });
+    });
+
+
+</script>
+@endpush @endonce
+
+@endsection

@@ -1,0 +1,49 @@
+<?php
+
+namespace Shiri\Domain\Reports;
+
+use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Support\Facades\Log;
+use Shiri\Core\Events\EventDispatcher;
+
+EventDispatcher::add_event_listener('shiri.core.console.consolekernel.schedule.cron', function ($params) {
+
+    if (get_class($scheduler = $params['schedule']) !== Schedule::class) {
+        return;
+    }
+
+    /** @var Services\Reports $reportService */
+    $reportService = app()->make(Services\Reports::class);
+
+    $scheduler->call(function () use ($reportService) {
+
+        $telemetry = $reportService->sendAnonymousTelemetry();
+
+        if ($telemetry === false) {
+            return;
+        }
+
+        try {
+
+            $response = $telemetry->wait();
+
+        } catch (\Throwable $e) {
+            Log::error($e);
+        }
+
+    })->name('reports:telemetry')->daily();
+
+    $scheduler->call(function () use ($reportService) {
+        $reportService->cronDailyIngestion();
+    })->name('reports:dailyIngestion')->daily();
+
+    // Safety net behind the goal-repository write hooks: records value changes that bypassed
+    // the repository so KPI trend history stays complete.
+    $scheduler->call(function () {
+        try {
+            app()->make(\Shiri\Domain\Goalcanvas\Repositories\Goalcanvas::class)->snapshotGoalValues();
+        } catch (\Throwable $e) {
+            Log::error($e);
+        }
+    })->name('reports:goalValueSnapshot')->daily();
+});

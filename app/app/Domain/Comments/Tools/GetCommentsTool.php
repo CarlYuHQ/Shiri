@@ -1,0 +1,93 @@
+<?php
+
+namespace Shiri\Domain\Comments\Tools;
+
+use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Illuminate\Support\Str;
+use Laravel\Mcp\Request;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\Server\Tool;
+use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
+use Shiri\Core\Exceptions\Contracts\ShiriExceptionInterface;
+use Shiri\Domain\Comments\Services\Comments;
+
+/**
+ * Get all comments for a specific entity.
+ */
+#[IsReadOnly]
+class GetCommentsTool extends Tool
+{
+    public function __construct(
+        private Comments $commentsService,
+    ) {}
+
+    /**
+     * @return array<string, \Illuminate\JsonSchema\Types\Type>
+     */
+    public function schema(JsonSchema $schema): array
+    {
+        return [
+            'module' => $schema->string()
+                ->description('Module type (ticket, project, goal, etc.).')
+                ->required(),
+            'entityId' => $schema->integer()
+                ->description('ID of the entity to get comments for.')
+                ->required(),
+            'commentOrder' => $schema->integer()
+                ->description('Order of comments (0 = newest first, 1 = oldest first).'),
+        ];
+    }
+
+    public function name(): string
+    {
+        return 'getComments';
+    }
+
+    public function title(): string
+    {
+        return 'Get Comments';
+    }
+
+    public function description(): string
+    {
+        return 'Gets all comments for a specific entity.';
+    }
+
+    /**
+     * Handle the tool request.
+     */
+    public function handle(Request $request): Response
+    {
+        $arguments = $request->all();
+
+        $module = $arguments['module'];
+        $entityId = (int) ($arguments['entityId'] ?? 0);
+        $commentOrder = (int) ($arguments['commentOrder'] ?? 0);
+
+        // Strict: an unknown module or a missing entity is an error, not "no comments".
+        try {
+            $comments = $this->commentsService->getComments($module, $entityId, $commentOrder, strict: true);
+        } catch (ShiriExceptionInterface $e) {
+            return Response::error($e->getClientMessage());
+        }
+
+        if (empty($comments)) {
+            return Response::text("No comments found for {$module} ID: {$entityId}");
+        }
+
+        $response = "## Comments for {$module} #{$entityId}\n";
+        foreach ($comments as $comment) {
+            $result = [
+                'id' => $comment['id'],
+                'text' => Str::sanitizeForLLM($comment['text']),
+                'date' => $comment['date'],
+                'userId' => $comment['userId'],
+                'author' => $comment['firstname'].' '.$comment['lastname'],
+                'status' => $comment['status'] ?: 'None',
+            ];
+            $response .= Str::toMarkdown($result)."\n";
+        }
+
+        return Response::text($response);
+    }
+}

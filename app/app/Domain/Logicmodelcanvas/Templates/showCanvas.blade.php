@@ -1,0 +1,254 @@
+@extends($layout)
+@section('content')
+
+@php
+    use Shiri\Domain\Logicmodelcanvas\Repositories\Logicmodelcanvas;
+    use Shiri\Domain\Comments\Repositories\Comments;
+
+    $canvasName = 'logicmodel';
+    $allCanvas = $tpl->get('allCanvas');
+    $canvasIcon = $tpl->get('canvasIcon');
+    $canvasTypes = $tpl->get('canvasTypes');
+    $statusLabels = $tpl->get('statusLabels');
+    $relatesLabels = $tpl->get('relatesLabels');
+    $dataLabels = $tpl->get('dataLabels');
+    $disclaimer = $tpl->get('disclaimer');
+    $canvasItems = $tpl->get('canvasItems');
+    $currentCanvas = $tpl->get('currentCanvas');
+    $users = $tpl->get('users');
+
+    $filter['status'] = $_GET['filter_status'] ?? (session('filter_status') ?? 'all');
+    // Logic model board does not use relates filter — force to 'all'
+    $filter['relates'] = 'all';
+
+    $canvasTitle = '';
+    foreach ($allCanvas as $canvasRow) {
+        if ($canvasRow['id'] == $currentCanvas) {
+            $canvasTitle = $canvasRow['title'];
+            break;
+        }
+    }
+
+    $stages = Logicmodelcanvas::STAGES;
+@endphp
+
+@include('global::components.stageflow.styles')
+
+<x-global::layout.page-header icon="fas {{ $canvasIcon }}">
+    @if (count($allCanvas) > 0)
+        <x-slot:switcher>
+            <x-global::subjectSwitcher
+                :parent="$tpl->__('headline.logicmodel.board')"
+                :current="$canvasTitle">
+                @if ($login::userIsAtLeast($roles::$editor))
+                    <li><a href="#/{{ $canvasName }}canvas/boardDialog">{!! $tpl->__('links.icon.create_new_board') !!}</a></li>
+                @endif
+                <li class="border"></li>
+                @foreach ($allCanvas as $canvasRow)
+                    <li><a href="{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas/{{ $canvasRow['id'] }}">{{ $tpl->escape($canvasRow['title']) }}</a></li>
+                @endforeach
+            </x-global::subjectSwitcher>
+        </x-slot:switcher>
+    @else
+        {{ $tpl->__('headline.logicmodel.board') }}
+    @endif
+    @if (count($allCanvas) > 0)
+        <x-slot:actions>
+            <x-global::actions.dropdown variant="header-menu">
+                @if ($login::userIsAtLeast($roles::$editor))
+                    <li><a href="#/{{ $canvasName }}canvas/boardDialog/{{ $currentCanvas }}" class="editCanvasLink">{!! $tpl->__('links.icon.edit') !!}</a></li>
+                @endif
+                <li><a href="{{ BASE_URL }}/{{ $canvasName }}canvas/export/{{ $currentCanvas }}" hx-boost="false">{!! $tpl->__('links.icon.export') !!}</a></li>
+                <li><a href="javascript:window.print();">{!! $tpl->__('links.icon.print') !!}</a></li>
+                @dispatchEvent('logicmodel.headerActions', ['canvasId' => $currentCanvas])
+                @if ($login::userIsAtLeast($roles::$editor))
+                    <li><a href="#/{{ $canvasName }}canvas/delCanvas/{{ $currentCanvas }}" class="delete">{!! $tpl->__('links.icon.delete') !!}</a></li>
+                @endif
+
+            </x-global::actions.dropdown>
+        </x-slot:actions>
+    @endif
+</x-global::layout.page-header>
+
+<div class="maincontent">
+    @if (count($allCanvas) > 0 && ! empty($statusLabels))
+        <x-global::navigation.view-tabs>
+            <x-slot:actions>
+                @php
+                    $statusColorMap = ['blue' => '#1B75BB', 'orange' => '#fdab3d', 'green' => '#75BB1B', 'red' => '#BB1B25', 'grey' => '#c3ccd4'];
+                    if ($filter['status'] != 'all' && !isset($statusLabels[$filter['status']])) { $filter['status'] = 'all'; }
+                    if ($filter['status'] == 'all') {
+                        $statusFilterLabel = '<i class="fas fa-filter"></i> ' . $tpl->__('status.all');
+                    } else {
+                        $sc = $statusColorMap[$statusLabels[$filter['status']]['color']] ?? '#666';
+                        $statusFilterLabel = '<i class="fas fa-fw ' . $statusLabels[$filter['status']]['icon'] . '" style="color:' . $sc . '"></i> ' . $statusLabels[$filter['status']]['title'];
+                    }
+                @endphp
+                <x-global::actions.dropdown variant="filter">
+                    <x-slot:trigger class="btn-link">{!! $statusFilterLabel !!}</x-slot:trigger>
+                    <li><a href="{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas?filter_status=all" @if ($filter['status'] == 'all') class="active" @endif><i class="fas fa-globe"></i> {{ $tpl->__('status.all') }}</a></li>
+                    @foreach ($statusLabels as $key => $data)
+                        @php $iconColor = $statusColorMap[$data['color']] ?? '#666'; @endphp
+                        <li><a href="{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas?filter_status={{ $key }}" @if ($filter['status'] == $key) class="active" @endif><i class="fas fa-fw {{ $data['icon'] }}" style="color:{{ $iconColor }}"></i> {{ $data['title'] }}</a></li>
+                    @endforeach
+                </x-global::actions.dropdown>
+            </x-slot:actions>
+        </x-global::navigation.view-tabs>
+    @endif
+
+    <x-global::layout.content-box>
+
+        {!! $tpl->displayNotification() !!}
+
+        @if (count($allCanvas) > 0)
+            {{-- Export & print live in the header 3-dot menu (and the plugin extends it
+                 via the logicmodel.headerActions hook), so no duplicate toolbar control here. --}}
+
+            @dispatchEvent('logicmodel.beforeStageFlow', ['canvasId' => $currentCanvas, 'canvasItems' => $canvasItems])
+
+            {{-- ── Five-Stage Flow ──────────────────────────────────── --}}
+            <div class="sf-flow" id="logicModelBoard">
+                @foreach ($stages as $num => $stage)
+                    @php
+                        $boxKey = 'lm_' . $stage['key'];
+                        $stageItems = array_filter($canvasItems, function ($item) use ($boxKey, $filter) {
+                            if ($item['box'] !== $boxKey) return false;
+                            if ($filter['status'] !== 'all' && $item['status'] !== $filter['status']) return false;
+                            if ($filter['relates'] !== 'all' && $item['relates'] !== $filter['relates']) return false;
+                            return true;
+                        });
+                        $itemCount = count($stageItems);
+                    @endphp
+
+                    <x-global::stageflow.card
+                        :stageKey="$boxKey"
+                        :stageNum="$num"
+                        :color="$stage['color']"
+                        :bgColor="$stage['bg']"
+                        :icon="$stage['icon']"
+                        :title="$tpl->__($stage['title'])"
+                        :subtitle="$tpl->__($stage['subtitle'])"
+                        :active="true"
+                        :itemCount="$itemCount"
+                        :focusLabel="''"
+                    >
+                        <x-slot:headerExtra>
+                            @dispatchEvent('logicmodel.afterStageHeader', ['stageNum' => $num, 'stage' => $stage, 'canvasId' => $currentCanvas, 'stageItems' => $stageItems])
+                        </x-slot:headerExtra>
+
+                        <x-slot:beforeBody>
+                            @dispatchEvent('logicmodel.beforeStageBody', ['stageNum' => $num, 'stage' => $stage, 'canvasId' => $currentCanvas])
+                        </x-slot:beforeBody>
+
+                        @foreach ($stageItems as $row)
+                            @php
+                                $commentsRepo = app()->make(Comments::class);
+                                $nbcomments = $commentsRepo->countComments(moduleId: $row['id']);
+                                $statusColor = isset($statusLabels[$row['status']]) ? $statusLabels[$row['status']]['color'] : 'grey';
+                            @endphp
+
+                            <x-global::stageflow.item
+                                :itemId="$row['id']"
+                                :title="$row['description']"
+                                :description="$row['conclusion'] ?? ''"
+                                :editUrl="'#/' . $canvasName . 'canvas/editCanvasItem/' . $row['id']"
+                                :deleteUrl="'#/' . $canvasName . 'canvas/delCanvasItem/' . $row['id']"
+                                :commentUrl="'#/' . $canvasName . 'canvas/editCanvasComment/' . $row['id']"
+                                :commentCount="$nbcomments"
+                                :authorId="$row['author']"
+                                :authorName="trim(($row['authorFirstname'] ?? '') . ' ' . ($row['authorLastname'] ?? ''))"
+                                :dotColor="$statusColor"
+                                :canEdit="$login::userIsAtLeast($roles::$editor)"
+                            >
+                                @dispatchEvent('logicmodel.itemCardFooter', ['item' => $row, 'canvasId' => $currentCanvas])
+                            </x-global::stageflow.item>
+                        @endforeach
+
+                        @if ($itemCount === 0)
+                            <div class="sf-empty">
+                                <i class="fa {{ $stage['icon'] }} sf-empty-icon" style="color: {{ $stage['color'] }};"></i>
+                                {{ $tpl->__('text.no_items_yet') }}
+                            </div>
+                        @endif
+
+                        @if ($login::userIsAtLeast($roles::$editor))
+                            <a class="sf-add" href="#/{{ $canvasName }}canvas/editCanvasItem?type={{ $boxKey }}">
+                                <i class="fa fa-plus"></i> {{ $tpl->__('logicmodel.add_' . $stage['key']) }}
+                            </a>
+                        @endif
+                    </x-global::stageflow.card>
+                @endforeach
+            </div>
+
+            @dispatchEvent('logicmodel.afterStageFlow', ['canvasId' => $currentCanvas, 'canvasItems' => $canvasItems])
+
+            <div class="clearfix"></div>
+        @endif
+
+        {{-- ── No Board Yet ─────────────────────────────────────── --}}
+        @if (count($allCanvas) == 0)
+            <br /><br />
+            <div class="center">
+                <div class="svgContainer">
+                    {!! file_get_contents(ROOT . '/dist/images/svg/undraw_design_data_khdb.svg') !!}
+                </div>
+                <h3>{{ $tpl->__('headlines.logicmodel.analysis') }}</h3>
+                <br />{!! $tpl->__('text.logicmodel.helper_content') !!}
+                @if ($login::userIsAtLeast($roles::$editor))
+                    <br /><br />
+                    <x-global::forms.button tag="a" link="javascript:void(0)" class="addCanvasLink" contentRole="primary">
+                        {{ $tpl->__('links.icon.create_new_board') }}
+                    </x-global::forms.button>
+                @endif
+            </div>
+        @endif
+
+        @if (!empty($disclaimer) && count($allCanvas) > 0)
+            <small class="center">{{ $disclaimer }}</small>
+        @endif
+
+        {!! $tpl->viewFactory->make($tpl->getTemplatePath('canvas', 'modals'), $__data)->render() !!}
+
+        {{-- Plugin panel containers (filled by HTMX when plugin is active) --}}
+        <div id="templateSelectorContainer"></div>
+
+    </x-global::layout.content-box>
+</div>
+
+<script type="text/javascript">
+    jQuery(document).ready(function () {
+
+        @if (isset($_GET['closeModal']))
+            jQuery.nmTop().close();
+        @endif
+
+        shiri.canvasController.setCanvasName('logicmodel');
+        shiri.canvasController.initFilterBar();
+
+        @if ($login::userIsAtLeast($roles::$editor))
+            shiri.canvasController.initCanvasLinks();
+        @else
+            shiri.authController.makeInputReadonly(".maincontentinner");
+        @endif
+
+        @if (isset($_GET['showModal']))
+            @php
+                if ($_GET['showModal'] == '') {
+                    $modalUrl = '&type=' . array_key_first($canvasTypes);
+                } else {
+                    $modalUrl = '/' . (int) $_GET['showModal'];
+                }
+            @endphp
+            shiri.canvasController.openModalManually("{{ BASE_URL }}/{{ $canvasName }}canvas/editCanvasItem{{ $modalUrl }}");
+            window.history.pushState({}, document.title, '{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas/');
+        @endif
+
+        // Reload page when sector fixture is loaded (items were added server-side by the plugin)
+        document.body.addEventListener('logicmodel.fixtureLoaded', function () {
+            window.location.reload();
+        });
+
+    });
+</script>
+
+@endsection

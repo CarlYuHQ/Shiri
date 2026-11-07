@@ -1,0 +1,317 @@
+@php
+    // Repository is used downstream for getReplies(). Renamed from
+    // $comments because the controller already assigns $comments to
+    // the array of comments to render — overwriting it with the
+    // repository object made the @foreach below iterate the object's
+    // (empty) public properties instead of the array, so every
+    // Discussion section came up empty regardless of how the comment
+    // was added.
+    $commentsRepo = app()->make(Shiri\Domain\Comments\Repositories\Comments::class);
+    $formUrl = CURRENT_URL;
+    $formHash = md5($formUrl);
+@endphp
+
+<form method="post" accept-charset="utf-8" action="{{ $formUrl }}" id="commentForm-{{ $formHash }}" class="formModal">
+
+    @if ($login::userIsAtLeast($roles::$commenter))
+        <div class="mainToggler-{{ $formHash }}" id="">
+            <div class="commentImage">
+                <img src="{{ BASE_URL }}/api/users?profileImage={{ session('userdata.id') }}&v={{ format(session('userdata.modified'))->timestamp() }}" />
+            </div>
+            <div class="commentReply inactive">
+                <a href="javascript:void(0);" onclick="toggleCommentBoxes(0, null, '{{ $formHash }}')">
+                    {!! __('links.add_new_comment') !!}
+                </a>
+            </div>
+        </div>
+
+        <div id="comment-{{ $formHash }}-0" class="commentBox-{{ $formHash }} commenterFields" style="display:none;">
+            <div class="commentImage">
+                <img src="{{ BASE_URL }}/api/users?profileImage={{ session('userdata.id') }}&v={{ format(session('userdata.modified'))->timestamp() }}" />
+            </div>
+            <div class="commentReply">
+                <textarea rows="5" cols="50" class="tiptapSimple" name="text"></textarea>
+                <input type="submit" value="{{ __('buttons.save') }}" name="comment" class="btn btn-primary btn-success" style="margin-left: 0px;"/>
+            </div>
+            <input type="hidden" name="comment" class="commenterField" value="1"/>
+            <input type="hidden" name="father" class="commenterField" id="father-{{ $formHash }}" value="0"/>
+            <input type="hidden" name="edit-comment-helper" class="commenterField" id="edit-comment-helper-{{ $formHash }}" />
+            <br/>
+        </div>
+    @endif
+
+    <div id="comments-{{ $formHash }}">
+        <div>
+            @foreach ($comments as $row)
+                <div class="clearall">
+                    <div class="commentImage" id="comment-image-to-hide-on-edit-{{ $formHash }}-{{ $row['id'] }}">
+                        <img src="{{ BASE_URL }}/api/users?profileImage={{ $row['userId'] }}&v={{ format($row['userModified'])->timestamp() }}"/>
+                    </div>
+                    <div class="commentMain">
+                        <x-global::elements.card compact class="commentContent" id="comment-to-hide-on-edit-{{ $formHash }}-{{ $row['id'] }}">
+                            <div class="right commentDate">
+                                {!! sprintf(__('text.written_on'), format($row['date'])->date(), format($row['date'])->time()) !!}
+                                    @if ($login::userIsAtLeast($roles::$editor))
+                                        <x-global::actions.dropdown style="float:right; margin-left:10px;">
+                                            @if (($row['userId'] == session('userdata.id')) || can('comments.moderate'))
+                                                <li><a href="javascript:void(0);" class="deleteComment" data-post-field="delComment" data-post-value="{{ $row['id'] }}">
+                                                    <span class="fa fa-trash"></span> {!! __('links.delete') !!}
+                                                </a></li>
+                                            @endif
+                                            @if (($row['userId'] == session('userdata.id')) || can('comments.moderate'))
+                                                <li>
+                                                    <a href="javascript:void(0);" onclick="toggleCommentBoxes({{ $row['id'] }}, null, '{{ $formHash }}', true)">
+                                                        <span class="fa fa-edit"></span> {!! __('label.edit') !!}
+                                                    </a>
+                                                </li>
+                                            @endif
+                                            @if (isset($ticket->id))
+                                                    <li><a href="javascript:void(0);" onclick="shiri.ticketsController.addCommentTimesheetContent({{ $row['id'] }}, {{ $ticket->id }});">{!! __('links.add_to_timesheets') !!}</a></li>
+                                            @endif
+
+                                        </x-global::actions.dropdown>
+                                    @endif
+                            </div>
+                            <span class="name">{!! sprintf(__('text.full_name'), $tpl->escape($row['firstname']), $tpl->escape($row['lastname'])) !!}</span>
+                            <div class="text tiptap-content" id="commentText-{{ $formHash }}-{{ $row['id'] }}">
+                                <div id="comment-text-to-hide-{{ $formHash }}-{{ $row['id'] }}">{!! $tpl->escapeMinimal($row['text']) !!}</div>
+                            </div>
+                        </x-global::elements.card>
+                        <div class="commentLinks" id="comment-link-to-hide-on-edit-{{ $formHash }}-{{ $row['id'] }}">
+                            @if ($login::userIsAtLeast($roles::$commenter))
+                                <a href="javascript:void(0);"
+                                   onclick="toggleCommentBoxes({{ $row['id'] }}, null, '{{ $formHash }}')">
+                                    <span class="fa fa-reply"></span> {!! __('links.reply') !!}
+                                </a>
+                            @endif
+                            <span class="comment-reactions" id="reactions-{{ $row['id'] }}"
+                                 hx-get="{{ BASE_URL }}/hx/comments/reactions/get?commentId={{ $row['id'] }}"
+                                 hx-trigger="load"
+                                 hx-swap="outerHTML">
+                            </span>
+                        </div>
+
+                        {{-- Reply/edit box for the parent comment. Kept ABOVE the replies thread so
+                             editing a comment that has replies opens the editor in place rather than
+                             jumping below its replies. (#3319) --}}
+                        <div style="display:none;" id="comment-{{ $formHash }}-{{ $row['id'] }}" class="commentBox">
+                            <div class="commentImage">
+                                <img src="{{ BASE_URL }}/api/users?profileImage={{ session('userdata.id') }}&v={{ format(session('userdata.modified'))->timestamp() }}"/>
+                            </div>
+                            <div class="commentReply">
+                                <x-global::forms.button tag="input" inputType="submit" :labelText="__('links.reply')" name="comment" id="submit-reply-button" contentRole="primary" />
+                                <x-global::forms.button tag="input" inputType="button" onclick="cancel({{ $row['id'] }}, '{{ $formHash }}')" :labelText="__('links.cancel')" contentRole="tertiary" />
+                            </div>
+                            <div class="clearall"></div>
+                        </div>
+
+                        <div class="replies">
+                            @if ($commentsRepo->getReplies($row['id']))
+                                @foreach ($commentsRepo->getReplies($row['id']) as $comment)
+                                    <div>
+                                        <div class="commentImage">
+                                            <img src="{{ BASE_URL }}/api/users?profileImage={{ $comment['userId'] }}&v={{ format($comment['userModified'])->timestamp() }}"/>
+                                        </div>
+                                        <div class="commentMain">
+                                            <x-global::elements.card compact class="commentContent">
+                                                <div class="right commentDate">
+                                                    {!! sprintf(__('text.written_on'), format($comment['date'])->date(), format($comment['date'])->time()) !!}
+                                                </div>
+                                                <span class="name">{!! sprintf(__('text.full_name'), $tpl->escape($comment['firstname']), $tpl->escape($comment['lastname'])) !!}</span>
+                                                <div class="text tiptap-content" id="comment-text-to-hide-reply-{{ $formHash }}-{{ $comment['id'] }}">{!! $tpl->escapeMinimal($comment['text']) !!}</div>
+                                            </x-global::elements.card>
+
+                                            <div class="commentLinks">
+                                                @if ($login::userIsAtLeast($roles::$commenter))
+                                                    <a href="javascript:void(0);"
+                                                       onclick="toggleCommentBoxes({{ $row['id'] }}, null, '{{ $formHash }}')">
+                                                        <span class="fa fa-reply"></span> {!! __('links.reply') !!}
+                                                    </a>
+                                                    @if ($comment['userId'] == session('userdata.id'))
+                                                        <a href="javascript:void(0);"
+                                                           class="deleteComment" data-post-field="delComment" data-post-value="{{ $comment['id'] }}">
+                                                            <span class="fa fa-trash"></span> {!! __('links.delete') !!}
+                                                        </a>
+                                                        <a href="javascript:void(0);" onclick="toggleCommentBoxes({{ $row['id'] }}, {{ $comment['id'] }}, '{{ $formHash }}', true, true)">
+                                                            <span class="fa fa-edit"></span> {!! __('label.edit') !!}
+                                                        </a>
+                                                    @endif
+                                                @endif
+                                                <span class="comment-reactions" id="reactions-{{ $comment['id'] }}"
+                                                     hx-get="{{ BASE_URL }}/hx/comments/reactions/get?commentId={{ $comment['id'] }}"
+                                                     hx-trigger="load"
+                                                     hx-swap="outerHTML">
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="clearall"></div>
+                                    </div>
+                                @endforeach
+                            @endif
+                        </div>
+                    </div>
+                </div>
+            @endforeach
+        </div>
+    </div>
+
+    <div class="clearall"></div>
+</form>
+
+<script type='text/javascript'>
+
+    jQuery(document).ready(function() {
+        if (window.shiri && window.shiri.tiptapController) {
+            shiri.tiptapController.initSimpleEditor();
+        }
+    });
+
+    function toggleCommentBoxes(id, commentId, formHash, editComment = false, isReply = false) {
+        @if ($login::userIsAtLeast($roles::$commenter))
+
+            if (parseInt(id, 10) === 0) {
+                jQuery(`.mainToggler-${formHash}`).hide();
+            } else {
+                jQuery(`.mainToggler-${formHash}`).show();
+            }
+            if (editComment) {
+                jQuery(`#comment-to-hide-on-edit-${formHash}-${id}`).hide();
+                jQuery(`#comment-link-to-hide-on-edit-${formHash}-${id}`).hide();
+                jQuery(`#comment-image-to-hide-on-edit-${formHash}-${id}`).hide();
+                jQuery(`#edit-comment-helper-${formHash}`).val(commentId || id);
+                jQuery('#submit-reply-button').val('{{ __('buttons.save') }}');
+            }
+
+            // Destroy existing Tiptap editors before removing textareas
+            jQuery(`.commentBox-${formHash}`).each(function() {
+                var wrapper = jQuery(this).find('.tiptap-wrapper');
+                if (wrapper.length && window.shiri && window.shiri.tiptapController) {
+                    shiri.tiptapController.registry.destroyWithin(wrapper[0]);
+                }
+            });
+
+            jQuery(`.commentBox-${formHash} textarea`).remove();
+            jQuery(`.commentBox-${formHash} .tiptap-wrapper`).remove();
+            jQuery(`.commentBox-${formHash}`).hide();
+
+            // Create textarea with tiptapSimple class
+            var initialContent = editComment ? jQuery(`#comment-text-to-hide-${isReply ? 'reply-' : ''}${formHash}-${commentId || id}`).html() : '';
+            jQuery(`#comment-${formHash}-${id} .commentReply`).prepend(`<textarea rows="5" cols="75" name="text" id="editor_${formHash}-${id}" class="tiptapSimple">${initialContent}</textarea>`);
+
+            // Initialize Tiptap editor
+            if (window.shiri && window.shiri.tiptapController) {
+                shiri.tiptapController.initSimpleEditor();
+                // Focus the editor after a short delay to allow initialization
+                setTimeout(function() {
+                    var editorEl = document.querySelector(`#comment-${formHash}-${id} .tiptap-editor`);
+                    if (editorEl) {
+                        var editor = shiri.tiptapController.registry.get(editorEl);
+                        if (editor) {
+                            editor.commands.focus('end');
+                        }
+                    }
+                }, 100);
+            }
+
+            jQuery(`#comment-${formHash}-${id}`).show();
+            jQuery(`#father-${formHash}`).val(id);
+
+        @endif
+    }
+    function cancel(id, formHash) {
+        @if ($login::userIsAtLeast($roles::$commenter))
+            jQuery(`#comment-to-hide-on-edit-${formHash}-${id}`).show();
+            jQuery(`.commentBox-${formHash} textarea`).remove();
+            jQuery(`#comment-link-to-hide-on-edit-${formHash}-${id}`).show();
+            jQuery(`#comment-image-to-hide-on-edit-${formHash}-${id}`).show();
+            jQuery(`#comment-${formHash}-${id}`).hide();
+        @endif
+    }
+
+    jQuery(".confetti").click(function(){
+        confetti({
+            spread: 70,
+            origin: { y: 1.2 },
+        });
+    });
+
+    function respondToVisibility(element, callback) {
+        var options = {
+            root: document.documentElement,
+        };
+
+        var observer = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                callback(entry.intersectionRatio > 0);
+            });
+        }, options);
+
+        observer.observe(element);
+    }
+
+    // Reaction emoji picker - uses keys that map to the Reactions model
+    var reactionOptions = [
+        { key: 'like', emoji: '👍' },
+        { key: 'love', emoji: '❤️' },
+        { key: 'celebrate', emoji: '🎉' },
+        { key: 'funny', emoji: '😄' },
+        { key: 'interesting', emoji: '🤔' },
+        { key: 'support', emoji: '💯' }
+    ];
+    var activeReactionPicker = null;
+
+    function toggleReactionPicker(btn, commentId) {
+        // Close any existing picker
+        if (activeReactionPicker) {
+            activeReactionPicker.remove();
+            activeReactionPicker = null;
+        }
+
+        // Create picker element
+        var picker = document.createElement('div');
+        picker.className = 'reaction-emoji-picker show';
+        picker.innerHTML = '<div class="reaction-emoji-picker__grid">' +
+            reactionOptions.map(function(r) {
+                return '<button type="button" class="reaction-emoji-picker__btn" ' +
+                    'onclick="addReaction(\'' + r.key + '\', ' + commentId + ')">' +
+                    r.emoji + '</button>';
+            }).join('') +
+        '</div>';
+
+        // Position the picker near the button
+        var btnRect = btn.getBoundingClientRect();
+        picker.style.position = 'fixed';
+        picker.style.left = btnRect.left + 'px';
+        picker.style.top = (btnRect.bottom + 5) + 'px';
+
+        document.body.appendChild(picker);
+        activeReactionPicker = picker;
+
+        // Close on click outside
+        setTimeout(function() {
+            document.addEventListener('click', closeReactionPicker);
+        }, 0);
+    }
+
+    function closeReactionPicker(e) {
+        if (activeReactionPicker && !activeReactionPicker.contains(e.target) && !e.target.classList.contains('add-reaction-btn')) {
+            activeReactionPicker.remove();
+            activeReactionPicker = null;
+            document.removeEventListener('click', closeReactionPicker);
+        }
+    }
+
+    function addReaction(reactionKey, commentId) {
+        if (activeReactionPicker) {
+            activeReactionPicker.remove();
+            activeReactionPicker = null;
+        }
+
+        // Make HTMX request to toggle reaction
+        htmx.ajax('POST', '{{ BASE_URL }}/hx/comments/reactions/toggle?commentId=' + commentId, {
+            values: { reaction: reactionKey },
+            target: '#reactions-' + commentId,
+            swap: 'outerHTML'
+        });
+    }
+</script>

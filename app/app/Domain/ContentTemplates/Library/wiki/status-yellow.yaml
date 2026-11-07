@@ -1,0 +1,14 @@
+key: "status-yellow"
+title: "t:templates.titles.yellow_status"
+description: "t:templates.titles.yellow_status_description"
+appliesTo: "wiki"
+icon: "fa-circle-exclamation"
+author: "Shiri"
+version: "1.0.0"
+license: "CC0"
+sector: "t:templates.elements"
+
+wiki:
+  articles:
+    - title: "Yellow Status"
+      content: '<p><mark data-color="#F1C40F" style="background-color: #F1C40F; color: #1a1a1a; padding: 0 6px; border-radius: 3px;">Yellow</mark></p>'

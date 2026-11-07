@@ -1,0 +1,127 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Shiri\Domain\Blueprints\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Http\IncomingRequest;
+use Shiri\Core\Language;
+use Shiri\Core\UI\Template;
+use Shiri\Domain\Blueprints\Models\CanvasTemplate;
+use Shiri\Domain\Blueprints\Permissions\BlueprintsPermissions;
+use Shiri\Domain\Blueprints\Repositories\Blueprints as BlueprintsRepository;
+use Shiri\Domain\Blueprints\Services\Blueprints as BlueprintsService;
+use Shiri\Domain\Blueprints\Services\TemplateRegistry;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * DelCanvas controller - handles canvas board deletion.
+ *
+ * Native Laravel controller: route-bound actions, the {canvasSlug}/{id} path segments
+ * arrive via the route (canvasSlug resolved in the constructor, id as a typed action arg),
+ * and request input is read from the injected IncomingRequest instead of the legacy
+ * merged-$params argument and superglobals.
+ */
+class DelCanvas
+{
+    private string $canvasSlug;
+
+    private ?CanvasTemplate $template;
+
+    public function __construct(
+        private IncomingRequest $request,
+        private Template $tpl,
+        private Language $language,
+        private BlueprintsService $blueprintsService,
+        private BlueprintsRepository $blueprintsRepo,
+        TemplateRegistry $templateRegistry,
+    ) {
+        $this->canvasSlug = strip_tags((string) ($request->route('canvasSlug') ?? ''));
+        $this->template = $templateRegistry->get($this->canvasSlug);
+    }
+
+    /**
+     * get - display the delete confirmation dialog.
+     *
+     * @param  string|null  $canvasSlug  Canvas type slug from the route (resolved in the constructor)
+     * @param  string|null  $id  Board id from the route
+     */
+    #[RequiresPermission(BlueprintsPermissions::DELETE)]
+    public function get(?string $canvasSlug = null, ?string $id = null): Response
+    {
+        if ($this->template === null) {
+            return $this->tpl->displayPartial('errors.error404');
+        }
+
+        // The route id is optional in the pattern but mandatory in practice: every caller
+        // links with a concrete id. Validate strictly rather than sanitising — FILTER_SANITIZE_NUMBER_INT
+        // lets "1-2" through, which a later (int) cast would silently read as 1 and act on the
+        // wrong record. Fail closed instead.
+        $canvasId = filter_var($id, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+
+        if ($canvasId === false) {
+            return $this->tpl->displayPartial('errors.error404');
+        }
+
+        $this->tpl->assign('canvasSlug', $this->canvasSlug);
+        $this->tpl->assign('id', $canvasId);
+
+        return $this->tpl->displayPartial('blueprints.delCanvas');
+    }
+
+    /**
+     * post - process the board deletion.
+     *
+     * @param  string|null  $canvasSlug  Canvas type slug from the route (resolved in the constructor)
+     * @param  string|null  $id  Board id from the route
+     */
+    #[RequiresPermission(BlueprintsPermissions::DELETE, entityScoped: true)]
+    public function post(?string $canvasSlug = null, ?string $id = null): Response
+    {
+        if ($this->template === null) {
+            return $this->tpl->displayPartial('errors.error404');
+        }
+
+        // The route id is optional in the pattern but mandatory in practice: every caller
+        // links with a concrete id. Validate strictly rather than sanitising — FILTER_SANITIZE_NUMBER_INT
+        // lets "1-2" through, which a later (int) cast would silently read as 1 and act on the
+        // wrong record. Fail closed instead.
+        $canvasId = filter_var($id, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+
+        if ($canvasId === false) {
+            return $this->tpl->displayPartial('errors.error404');
+        }
+
+        $canvasType = $this->template->getDatabaseType();
+        $sessionKey = $this->template->getSessionKey();
+
+        if ($this->request->has('del')) {
+            // The service resolves the board's REAL project and authorizes DELETE against it
+            // (throwing 403 for a missing/foreign board) — closing the by-id board-delete IDOR
+            // that the previous role-only Auth::authOrRedirect left open.
+            $this->blueprintsService->deleteBoard($canvasId, $canvasType);
+
+            $allCanvas = $this->blueprintsRepo->getAllCanvas(session('currentProject'), $canvasType);
+            session([$sessionKey => $allCanvas[0]['id'] ?? -1]);
+
+            $this->tpl->setNotification(
+                $this->language->__('notification.board_deleted'),
+                'success',
+                strtoupper($this->canvasSlug).'canvas_deleted'
+            );
+
+            if (! $allCanvas) {
+                return Frontcontroller::redirect(BASE_URL.'/blueprints/showBoards');
+            }
+
+            return Frontcontroller::redirect(BASE_URL.'/blueprints/'.$this->canvasSlug.'/showCanvas');
+        }
+
+        $this->tpl->assign('canvasSlug', $this->canvasSlug);
+        $this->tpl->assign('id', $canvasId);
+
+        return $this->tpl->displayPartial('blueprints.delCanvas');
+    }
+}

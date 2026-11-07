@@ -1,0 +1,127 @@
+@extends($layout)
+
+@section('content')
+
+@php
+    $milestones = $milestones ?? [];
+    $timelineTasks = $timelineTasks ?? [];
+    $roadmapView = session('usersettings.views.roadmap', 'Month');
+@endphp
+
+@include('tickets::submodules.timelineHeader')
+
+<div class="maincontent">
+
+    @include('tickets::submodules.timelineTabs')
+
+    <x-global::layout.content-box>
+
+        @php
+        if (
+            (is_array($timelineTasks) && count($timelineTasks) == 0) ||
+            $timelineTasks == false
+        ) {
+            echo "<div class='empty' id='emptySprint' style='text-align:center;'>";
+            echo "<div style='width:30%' class='svgContainer'>";
+            echo file_get_contents(ROOT.'/dist/images/svg/undraw_adjustments_p22m.svg');
+            echo '</div>';
+            echo '<h4>'.__('headlines.no_tickets').'<br /></h4></div>';
+        }
+        @endphp
+        <div class="gantt-wrapper">
+            <svg id="gantt"></svg>
+        </div>
+
+    </x-global::layout.content-box>
+</div>
+
+@once @push('scripts')
+<script type="text/javascript">
+
+    jQuery(document).ready(function(){
+
+
+    @if (isset($_GET['showMilestoneModal']))
+        @php
+            $modalUrl = $_GET['showMilestoneModal'] == '' ? '' : '/'.(int) $_GET['showMilestoneModal'];
+        @endphp
+
+        shiri.ticketsController.openMilestoneModalManually("{{ BASE_URL }}/tickets/editMilestone{{ $modalUrl }}");
+        window.history.pushState({},document.title, '{{ BASE_URL }}/tickets/roadmap');
+
+    @endif
+
+
+});
+
+
+    @php
+
+    if (count($timelineTasks) > 0) {
+    @endphp
+        var tasks = [
+
+            @php
+            $lastMilestoneSortIndex = [];
+
+            foreach ($timelineTasks as $mlst) {
+                if ($mlst->type == 'milestone') {
+                    $lastMilestoneSortIndex[$mlst->id] = ($mlst->sortIndex != '') ? $mlst->sortIndex : 999;
+                }
+            }
+
+            foreach ($timelineTasks as $mlst) {
+
+                $headline = __('label.'.strtolower($mlst->type)).': '.$mlst->headline;
+                if ($mlst->type == 'milestone') {
+                    $headline .= ' ('.format($mlst->percentDone)->decimal().'% Done)';
+                }
+
+                $color = '#8D99A6';
+                if ($mlst->type == 'milestone') {
+                    $color = $mlst->tags;
+                }
+
+                $sortIndex = $mlst->sortIndex;
+
+                $dependencyList = [];
+
+                // Use explicit > 0 checks: new milestones store dependingTicketId as an empty
+                // string, and under PHP 8 `'' != 0` is true — which pushed an empty dependency and
+                // skipped the real milestoneid, so a dependency set in table mode never rendered here.
+                if ((int) $mlst->dependingTicketId > 0) {
+                    $dependencyList[] = $mlst->dependingTicketId;
+                } elseif ((int) $mlst->milestoneid > 0) {
+                    $dependencyList[] = $mlst->milestoneid;
+                }
+
+                echo "{
+                            id :'".$mlst->id."',
+                            name :".json_encode($headline, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP).",
+                            start :'".(dtHelper()->isValidDateString($mlst->editFrom) ? $mlst->editFrom : dtHelper()->userNow()->addDays(2)->format('Y-m-d'))."',
+                            end :'".(dtHelper()->isValidDateString($mlst->editTo) ? $mlst->editTo : dtHelper()->userNow()->addDays(2)->format('Y-m-d'))."',
+                            progress :'".format($mlst->percentDone)->decimal()."',
+                            dependencies :'".implode(',', $dependencyList)."',
+                            custom_class :'',
+                            type: '".strtolower($mlst->type)."',
+                            bg_color: ".json_encode($color, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_TAG | JSON_HEX_AMP).",
+                            thumbnail: '".BASE_URL.'/api/users?profileImage='.$mlst->editorId."',
+                            sortIndex: ".$sortIndex.'
+                        },';
+            }
+            @endphp
+        ];
+
+        @if ($login::userIsAtLeast($roles::$editor))
+        shiri.ticketsController.initGanttChart(tasks, '{{ $roadmapView }}', false);
+        @else
+        shiri.ticketsController.initGanttChart(tasks, '{{ $roadmapView }}', true);
+        @endif
+
+    @php } @endphp
+
+
+</script>
+@endpush @endonce
+
+@endsection

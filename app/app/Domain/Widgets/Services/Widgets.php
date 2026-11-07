@@ -1,0 +1,438 @@
+<?php
+
+namespace Shiri\Domain\Widgets\Services;
+
+use Illuminate\Support\Facades\Cache;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+use Shiri\Domain\Reports\Services\Reports as ReportService;
+use Shiri\Domain\Setting\Repositories\Setting;
+use Shiri\Domain\Users\Services\Users;
+use Shiri\Domain\Widgets\Events\DashboardWidgetAdded;
+use Shiri\Domain\Widgets\Models\Widget;
+
+class Widgets
+{
+    use DispatchesEvents;
+
+    /**
+     * @api
+     */
+    public array $availableWidgets = [];
+
+    /**
+     * @api
+     */
+    public array $defaultWidgets = [];
+
+    /**
+     * @api
+     */
+    public Setting $settingRepo;
+
+    private const WIDGET_HISTORY_KEY = 'usersettings.%d.widgetHistory';
+
+    private const ACTIVE_WIDGETS_KEY = 'usersettings.%d.dashboardGrid';
+
+    /**
+     * __construct method.
+     *
+     * Initializes the object and sets the available widgets and default widgets.
+     *
+     * @param  Setting  $settingRepo  The Setting repository object
+     * @return void
+     */
+    public function __construct(
+        Setting $settingRepo,
+        protected ProjectService $projectService,
+        protected ReportService $reportService
+    ) {
+
+        $this->settingRepo = $settingRepo;
+
+        $this->availableWidgets['welcome'] = app()->make("Shiri\Domain\Widgets\Models\Widget", [
+            'id' => 'welcome',
+            'name' => 'widgets.title.welcome',
+            'description' => 'widgets.descriptions.welcome',
+            'widgetUrl' => BASE_URL.'/widgets/welcome/get',
+            'gridHeight' => 7,
+            'gridWidth' => 12,
+            'gridMinHeight' => 7,
+            'gridMinWidth' => 6,
+            'gridX' => 0,
+            'gridY' => 0,
+            'widgetBackground' => '',
+            'widgetTrigger' => 'load, every 5m',
+            'alwaysVisible' => true,
+            'noTitle' => true,
+            'fixed' => true,
+        ]);
+
+        $this->availableWidgets['todos'] = app()->make("Shiri\Domain\Widgets\Models\Widget", [
+            'id' => 'todos',
+            'name' => 'widgets.title.my_todos',
+            'description' => 'widgets.descriptions.my_todos',
+            'widgetUrl' => BASE_URL.'/widgets/myToDos/get',
+            'gridHeight' => 30,
+            'gridWidth' => 8,
+            'gridMinHeight' => 16,
+            'gridMinWidth' => 3,
+            'gridX' => 0,
+            'gridY' => 7,
+            'alwaysVisible' => false,
+            'noTitle' => false,
+            'fixed' => false,
+
+        ]);
+
+        $this->availableWidgets['calendar'] = app()->make("Shiri\Domain\Widgets\Models\Widget", [
+            'id' => 'calendar',
+            'name' => 'widgets.title.calendar',
+            'description' => 'widgets.descriptions.calendar',
+            'gridHeight' => 30,
+            'gridWidth' => 4,
+            'gridMinHeight' => 12,
+            'gridMinWidth' => 3,
+            'gridX' => 8,
+            'gridY' => 7,
+            'alwaysVisible' => false,
+            'noTitle' => false,
+            'widgetUrl' => BASE_URL.'/widgets/calendar/get',
+            'fixed' => false,
+        ]);
+
+        $this->availableWidgets['myprojects'] = app()->make("Shiri\Domain\Widgets\Models\Widget", [
+            'id' => 'myprojects',
+            'name' => 'widgets.title.my_projects',
+            'description' => 'widgets.descriptions.my_projects',
+            'gridHeight' => 22,
+            'gridWidth' => 8,
+            'gridMinHeight' => 10,
+            'gridMinWidth' => 2,
+            'gridX' => 0,
+            'gridY' => 43,
+            'alwaysVisible' => false,
+            'noTitle' => false,
+            'widgetUrl' => BASE_URL.'/widgets/myProjects/get',
+            'fixed' => false,
+        ]);
+
+        $this->defaultWidgets = [
+            'welcome' => $this->availableWidgets['welcome'],
+            'calendar' => $this->availableWidgets['calendar'],
+            'todos' => $this->availableWidgets['todos'],
+        ];
+
+        $this->availableWidgets = self::dispatch_filter('availableWidgets', $this->availableWidgets);
+        $this->defaultWidgets = self::dispatch_filter('defaultWidgets', $this->defaultWidgets, ['availableWidgets' => $this->availableWidgets]);
+    }
+
+    /**
+     * Register a new widget.
+     *
+     * @param  Widget  $widget  The widget to register.
+     *
+     * @api
+     */
+    public function registerWidget(Widget $widget): void
+    {
+        $this->availableWidgets[$widget->id] = $widget;
+
+        // Update widget history for all users
+        $users = app()->make(Users::class)->getAll(true);
+        foreach ($users as $user) {
+            $widgetHistory = $this->getWidgetHistory($user['id']);
+            // Don't add to history during registration - let users discover it
+            if (! isset($widgetHistory[$widget->id])) {
+                $widget->isNew = true;
+
+                continue;
+            }
+        }
+    }
+
+    /**
+     * Retrieves all available widgets.
+     *
+     * @return array The array of available widgets.
+     *
+     * @api
+     */
+    public function getAll(): array
+    {
+        return DispatchesEvents::dispatch_filter('availableWidgets', $this->availableWidgets);
+    }
+
+    /**
+     * Restores any always-visible widget missing from a grid and returns it sorted by position.
+     *
+     * The Welcome widget carries the only link to the Widget Manager; the mobile layout drops it
+     * from the grid engine and a later saveGrid persisted that, leaving hidden widgets
+     * unrestorable (#3791).
+     *
+     * @param  array  $widgets  Widgets keyed by id.
+     * @return array The widgets with always-visible ones restored, sorted by gridY then gridX.
+     */
+    private function withAlwaysVisibleWidgets(array $widgets): array
+    {
+        foreach ($this->defaultWidgets as $widgetId => $defaultWidget) {
+            $isAlwaysVisible = $this->availableWidgets[$widgetId]->alwaysVisible ?? false;
+
+            if ($isAlwaysVisible && ! isset($widgets[$widgetId])) {
+                $widgets[$widgetId] = $defaultWidget;
+            }
+        }
+
+        return array_sort($widgets, [['gridY', 'asc'], ['gridX', 'asc']]);
+    }
+
+    /**
+     * Retrieves the active widgets for a specific user.
+     *
+     * @param  int  $userId  The ID of the user.
+     * @return array The array of active widgets.
+     *
+     * @api
+     */
+    public function getActiveWidgets(int $userId): array
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $activeWidgetKey = sprintf(self::ACTIVE_WIDGETS_KEY, $userId);
+
+        if (Cache::has($activeWidgetKey) && is_array(Cache::get($activeWidgetKey)) && count(Cache::get($activeWidgetKey)) > 0) {
+            // A cached grid can predate the always-visible restore below (30-day TTL), so it gets
+            // the same treatment before being returned (#3791).
+            return $this->withAlwaysVisibleWidgets(Cache::get($activeWidgetKey));
+        }
+
+        $activeWidgets = $this->settingRepo->getSetting($activeWidgetKey);
+        $widgetHistory = $this->getWidgetHistory($userId);
+        $widgets = $this->defaultWidgets;
+
+        if ($activeWidgets && $activeWidgets != '') {
+            $unserializedData = safe_unserialize($activeWidgets, []);
+
+            $widgets = [];
+            foreach ($unserializedData as $key => $widget) {
+
+                if (isset($widget['id']) === false) {
+                    continue;
+                }
+
+                // Check if this widget exists in available widgets but not in user's stored widgets
+                if (isset($this->availableWidgets[$widget['id']]) && ! isset($widgetHistory[$widget['id']])) {
+                    $widget['isNew'] = true;
+                }
+
+                if (isset($this->availableWidgets[$widget['id']])) {
+                    $widget['name'] = $this->availableWidgets[$widget['id']]->name;
+                    $widget['widgetUrl'] = $this->availableWidgets[$widget['id']]->widgetUrl;
+                    $widget['widgetBackground'] = $this->availableWidgets[$widget['id']]->widgetBackground;
+                    $widget['description'] = $this->availableWidgets[$widget['id']]->description;
+                    $widget['widgetTrigger'] = $this->availableWidgets[$widget['id']]->widgetTrigger;
+                    $widget['alwaysVisible'] = $this->availableWidgets[$widget['id']]->alwaysVisible;
+                    $widget['gridMinWidth'] = $this->availableWidgets[$widget['id']]->gridMinWidth;
+                    $widget['gridMinHeight'] = $this->availableWidgets[$widget['id']]->gridMinHeight;
+                    $widget['noTitle'] = $this->availableWidgets[$widget['id']]->noTitle;
+                    $widget['fixed'] = $this->availableWidgets[$widget['id']]->fixed;
+                    $widgets[$widget['id']] = app()->make(Widget::class, $widget);
+                }
+            }
+        }
+
+        $widgets = $this->withAlwaysVisibleWidgets($widgets);
+
+        Cache::set($activeWidgetKey, $widgets, new \DateInterval('P30D'));
+
+        return $widgets;
+    }
+
+    /**
+     * Resets the dashboard grid for a specific user.
+     *
+     * @param  int  $userId  The ID of the user for whom the dashboard grid needs to be reset.
+     *
+     * @api
+     */
+    public function resetDashboard(int $userId): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $activeWidgetKey = sprintf(self::ACTIVE_WIDGETS_KEY, $userId);
+
+        Cache::forget($activeWidgetKey);
+        $this->settingRepo->deleteSetting($activeWidgetKey);
+    }
+
+    /**
+     * Get new widgets for the user.
+     *
+     * @param  int  $userId  The ID of the user.
+     * @return array An array of new widgets.
+     *
+     * @api
+     */
+    public function getNewWidgets(int $userId): array
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+        $availableWidgets = $this->getAll();
+        $widgetHistory = $this->getWidgetHistory($userId);
+        $activeWidgets = $this->getActiveWidgets($userId);
+
+        $newWidgets = [];
+
+        foreach ($availableWidgets as $widgetId => $widget) {
+            if (! isset($widgetHistory[$widgetId]) && ! isset($activeWidgets[$widgetId])) {
+                $widget->isNew = true;
+                $newWidgets[$widgetId] = $widget;
+            }
+        }
+
+        return $newWidgets;
+    }
+
+    /**
+     * Get widget history for a user
+     */
+    private function getWidgetHistory(int $userId): array
+    {
+        $historyKey = sprintf(self::WIDGET_HISTORY_KEY, $userId);
+        $history = $this->settingRepo->getSetting($historyKey);
+
+        return $history ? safe_unserialize($history, []) : [];
+    }
+
+    /**
+     * Mark a widget as seen by a user
+     */
+    public function markWidgetAsSeen(int $userId, string $widgetId): void
+    {
+        $historyKey = sprintf(self::WIDGET_HISTORY_KEY, $userId);
+        $history = $this->getWidgetHistory($userId);
+        $history[$widgetId] = time();
+        $this->settingRepo->saveSetting($historyKey, serialize($history));
+    }
+
+    public function saveGrid($data, $userId)
+    {
+        $activeWidgetKey = sprintf(self::ACTIVE_WIDGETS_KEY, $userId);
+        Cache::forget($activeWidgetKey);
+        $this->settingRepo->saveSetting($activeWidgetKey,
+            serialize($data)
+        );
+
+    }
+
+    /**
+     * Persists the dashboard grid for a user and, when visibility data marks the
+     * widget as visible, records it in the user's widget history.
+     *
+     * @param  mixed  $data  The grid layout data to persist.
+     * @param  int  $userId  The user whose grid is being saved.
+     * @param  array|null  $visibilityData  Optional ['visible' => bool, 'widgetId' => string] payload.
+     *
+     * @api
+     */
+    public function saveGridForUser($data, int $userId, ?array $visibilityData = null): void
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+
+        $previousWidgetIds = $this->storedGridWidgetIds($userId);
+
+        $this->saveGrid($data, $userId);
+
+        if ($visibilityData !== null && ! empty($visibilityData['visible'])) {
+            $this->markWidgetAsSeen($userId, $visibilityData['widgetId']);
+        }
+
+        // Only widgets that were not on the grid before count as added; drags and resizes re-post
+        // the same set of widgets.
+        foreach (array_diff($this->gridWidgetIds($data), $previousWidgetIds) as $addedWidgetId) {
+            DashboardWidgetAdded::dispatch(widgetId: $addedWidgetId);
+        }
+    }
+
+    /**
+     * The ids of the widgets on the user's stored grid; the default widgets when the user never
+     * saved a grid.
+     *
+     * @param  int  $userId  The user.
+     * @return array<int, string>
+     */
+    private function storedGridWidgetIds(int $userId): array
+    {
+        $storedGrid = $this->settingRepo->getSetting(sprintf(self::ACTIVE_WIDGETS_KEY, $userId));
+
+        if (! $storedGrid) {
+            return array_map('strval', array_keys($this->defaultWidgets));
+        }
+
+        return $this->gridWidgetIds(safe_unserialize($storedGrid, []));
+    }
+
+    /**
+     * The widget ids in a grid layout payload (a list of items carrying an `id`).
+     *
+     * @param  mixed  $grid  The grid layout.
+     * @return array<int, string>
+     */
+    private function gridWidgetIds(mixed $grid): array
+    {
+        if (! is_array($grid)) {
+            return [];
+        }
+
+        $widgetIds = [];
+        foreach ($grid as $item) {
+            if (is_array($item) && isset($item['id']) && is_scalar($item['id']) && (string) $item['id'] !== '') {
+                $widgetIds[] = (string) $item['id'];
+            }
+        }
+
+        return array_values(array_unique($widgetIds));
+    }
+
+    /**
+     * Builds the data for the "My Projects" dashboard widget: the open projects
+     * assigned to the user, each enriched with its progress and realtime report,
+     * plus a deduplicated client map.
+     *
+     * @param  int  $userId  The user whose assigned projects to load
+     * @param  string  $clientFilter  Optional client id to filter projects by ('' = all clients)
+     * @return array{projects: array<int, array<string, mixed>>, clients: array<int|string, string>}
+     *
+     * @api
+     */
+    public function getMyProjectsWidgetData(int $userId, string $clientFilter = ''): array
+    {
+        // Self-service: pin to the authenticated user (ignore any caller-supplied id — prevents RPC IDOR).
+        $userId = (int) session('userdata.id');
+        $assignedProjects = $this->projectService->getProjectsAssignedToUser($userId, 'open');
+
+        $clients = [];
+        $projects = [];
+
+        foreach ($assignedProjects as $project) {
+            // Build the client map from every assigned project, regardless of filter.
+            if (! array_key_exists($project['clientId'], $clients)) {
+                $clients[$project['clientId']] = $project['clientName'];
+            }
+
+            if ($clientFilter !== '' && $project['clientId'] != $clientFilter) {
+                continue;
+            }
+
+            $project['progress'] = $this->projectService->getProjectProgress($project['id']);
+            $project['report'] = $this->reportService->getRealtimeReport($project['id'], '');
+
+            $projects[] = $project;
+        }
+
+        return ['projects' => $projects, 'clients' => $clients];
+    }
+}

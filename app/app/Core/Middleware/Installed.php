@@ -1,0 +1,107 @@
+<?php
+
+namespace Shiri\Core\Middleware;
+
+use Closure;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\Http\IncomingRequest;
+use Shiri\Domain\Setting\Repositories\Setting as SettingRepository;
+use Symfony\Component\HttpFoundation\Response;
+
+class Installed
+{
+    use DispatchesEvents;
+
+    /**
+     * Check if Shiri is installed
+     *
+     * @param  \Closure(IncomingRequest): Response  $next
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     **/
+    public function handle(IncomingRequest $request, Closure $next): Response
+    {
+        $session_says = session()->exists('isInstalled') && session('isInstalled');
+
+        // For HTMX and API requests, trust the session -- install state can't change mid-session.
+        // This avoids a cache/DB lookup on every partial request.
+        if ($session_says && ($request->isHtmxRequest() || $request->isApiOrCronRequest())) {
+            return $next($request);
+        }
+
+        $config_says = app()->make(SettingRepository::class)->checkIfInstalled();
+
+        if (! $session_says && ! $config_says) {
+            $this->setUninstalled();
+
+            if (! $response = $this->redirectToInstall($request)) {
+                return $next($request);
+            }
+
+            return $response;
+        }
+
+        if ($session_says && ! $config_says) {
+            $this->setUninstalled();
+
+            if (! $response = $this->redirectToInstall($request)) {
+                return $next($request);
+            }
+
+            return $response;
+        }
+
+        if (! $session_says) {
+            $this->setInstalled();
+        }
+
+        self::dispatchEvent('after_install');
+
+        // /install on an installed instance is handled by the Install controller: it sends the
+        // visitor to the start page, or back into the owner's setup when that was never finished.
+        return $next($request);
+    }
+
+    /**
+     * Set installed
+     */
+    private function setInstalled(): void
+    {
+        session(['isInstalled' => true]);
+    }
+
+    /**
+     * Set uninstalled
+     */
+    private function setUninstalled(): void
+    {
+        session(['isInstalled' => false]);
+
+        if (session()->exists('userdata')) {
+            session()->forget('userdata');
+        }
+    }
+
+    /**
+     * Redirect to install
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     */
+    private function redirectToInstall(IncomingRequest $request): Response|false
+    {
+        $frontController = app()->make(Frontcontroller::class);
+
+        $allowedRoutes = ['install', 'install.update', 'api.i18n'];
+        $allowedRoutes = self::dispatchFilter('allowedRoutes', $allowedRoutes);
+        $route = $request->getCurrentRoute();
+        if (in_array($request->getCurrentRoute(), $allowedRoutes)) {
+            return false;
+        }
+
+        $route = BASE_URL.'/install';
+        $route = self::dispatchFilter('redirectroute', $route);
+
+        return $frontController::redirect($route);
+    }
+}

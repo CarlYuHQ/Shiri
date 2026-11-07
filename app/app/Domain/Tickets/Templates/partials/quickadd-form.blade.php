@@ -1,0 +1,87 @@
+@php
+/**
+ * Quick-add form partial for Kanban columns
+ *
+ * @var int $statusId - Status column ID
+ * @var string|null $swimlaneKey - Swimlane identifier
+ * @var bool $isEmpty - Whether column is empty
+ * @var array|null $reopenState - Session flash data
+ */
+$isActive = !empty($reopenState)
+    && $reopenState['status'] == $statusId
+    && ($reopenState['swimlane'] ?? null) == ($swimlaneKey ?? null);
+
+$savedHeadline = $isActive ? ($reopenState['headline'] ?? '') : '';
+$hasError = $isActive && !empty($reopenState['error']);
+@endphp
+
+<div class="quickaddContainer tw-mb-s {{ $isEmpty ? 'quickaddContainer--empty' : '' }}" data-status="{{ $statusId }}" data-swimlane="{{ $swimlaneKey ?? '' }}">
+    <a href="javascript:void(0);"
+       class="quickAddLink {{ $isEmpty ? 'empty-state' : 'inline-add' }}"
+       onclick="shiri.kanbanController.toggleQuickAdd(this)"
+       aria-expanded="{{ $isActive ? 'true' : 'false' }}"
+       aria-controls="quickadd-form-{{ $statusId }}-{{ $swimlaneKey ?? 'default' }}"
+       style="{{ $isActive ? 'display:none;' : '' }}">
+        <i class="fa-solid fa-plus"></i>
+        <span>{{ __('links.add_todo_no_icon') }}</span>
+    </a>
+
+    <form method="post"
+          class="quickAddForm {{ $isActive ? 'active' : '' }}"
+          id="quickadd-form-{{ $statusId }}-{{ $swimlaneKey ?? 'default' }}"
+          data-quickadd-form
+          style="{{ $isActive ? '' : 'display:none;' }}"
+          data-submitting="false">
+        <input type="hidden" name="quickadd" value="1" />
+        <input type="hidden" name="status" value="{{ $statusId }}" />
+        <input type="hidden" name="swimlane" value="{{ $swimlaneKey ?? '' }}" />
+        <input type="hidden" name="groupBy" value="{{ $currentGroupBy ?? '' }}" />
+        <input type="hidden" name="milestone" value="{{ $searchCriteria['milestone'] ?? '' }}" />
+        <input type="hidden" name="sprint" value="{{ session('currentSprint') ?? '' }}" />
+        <input type="hidden" name="stay_open" value="0" data-stay-open-input />
+
+        @if (! empty($programBoard) && ! empty($availableProjects))
+            {{-- Program board: a new task must belong to exactly one child project. --}}
+            <div class="form-group">
+                <x-global::forms.select name="quickaddProjectId" class="form-control" required aria-label="{{ __('label.project') }}">
+                    <option value="">{{ __('label.project') }}…</option>
+                    @foreach ($availableProjects as $quickAddProjectId => $quickAddProjectName)
+                        <option value="{{ $quickAddProjectId }}">{{ $tpl->escape($quickAddProjectName) }}</option>
+                    @endforeach
+                </x-global::forms.select>
+            </div>
+        @endif
+
+        <div class="form-group">
+            <label for="headline-{{ $statusId }}-{{ $swimlaneKey ?? 'default' }}" class="sr-only">{{ __('label.taskName', 'Task name') }}</label>
+            <input type="text"
+                   name="headline"
+                   id="headline-{{ $statusId }}-{{ $swimlaneKey ?? 'default' }}"
+                   class="form-control quickAddInput {{ $hasError ? 'error' : '' }}"
+                   placeholder="{{ __('label.quickAddPlaceholder', 'What are you working on? ↵') }}"
+                   value="{{ htmlspecialchars($savedHeadline) }}"
+                   {{ $isActive ? 'autofocus' : '' }}
+                   data-quickadd-input />
+
+            @if ($hasError)
+                <div class="error-message" role="alert">{{ htmlspecialchars($reopenState['error']) }}</div>
+            @endif
+
+            <div id="quick-add-help-{{ $statusId }}-{{ $swimlaneKey ?? 'default' }}" class="sr-only">
+                {{ __('label.quickAddHelp', 'Press Enter to save and close. Press Shift plus Enter to save and add another task. Press Escape to cancel.') }}
+            </div>
+        </div>
+
+        <div class="formButtonContainer">
+            <x-global::forms.button inputType="submit" contentRole="primary" onclick="this.closest('form').dataset.submitting = 'true'; this.closest('form').querySelector('[data-stay-open-input]').value = '0';">{{ __('buttons.save', 'Save') }}</x-global::forms.button>
+            <x-global::forms.button inputType="button" contentRole="secondary"
+                    onclick="shiri.kanbanController.toggleQuickAdd(this.closest('.quickaddContainer').querySelector('.quickAddLink'))">
+                {{ __('buttons.cancel', 'Cancel') }}
+            </x-global::forms.button>
+            <i class="fa fa-circle-question"
+               data-tippy-content="{{ __('label.quickAddShortcuts', '<strong>Keyboard Shortcuts:</strong><br>Enter: Save and close<br>Shift+Enter: Save and add another<br>Esc: Cancel') }}"
+               tabindex="0"
+               aria-label="{{ __('label.keyboardShortcutsHelp', 'Keyboard shortcuts help') }}"></i>
+        </div>
+    </form>
+</div>

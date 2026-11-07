@@ -1,0 +1,285 @@
+/*
+ * 极简主题（本机）
+ * ---------------------------------------------------------------------------
+ * 去掉 Shiri 默认的玻璃质感、渐变、阴影、多层圆角卡片和各种悬浮按钮，
+ * 只留：一条顶栏（应用名）+ 一块整宽日历。
+ *
+ * 通过 app/Views/Templates/sections/header.blade.php 全局引入，对整站生效。
+ */
+
+/* ── 基础 ─────────────────────────────────────────────────────────────── */
+:root {
+    --lt-bg: #ffffff;
+    --lt-border: #ecebe8;
+    --lt-border-strong: #dedbd6;
+    --lt-text: #22201d;
+    --lt-muted: #8b8781;
+    --lt-hover: #f4f1ee;
+}
+
+/* 主题把背景图挂在 .rightpanel::before 上（bg5.png, opacity .5），去掉 */
+.rightpanel::before {
+    background-image: none !important;
+    display: none !important;
+}
+
+/* 主题在 .mainwrapper 上挂了渐变色块背景，全部去掉 */
+.mainwrapper {
+    background: none !important;
+    background-image: none !important;
+}
+
+body {
+    background: var(--lt-bg) !important;
+    background-image: none !important;
+    color: var(--lt-text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+/* ── 顶栏：只剩应用名 ─────────────────────────────────────────────────── */
+.header.lt-topbar {
+    background: var(--lt-bg) !important;
+    border-bottom: 1px solid var(--lt-border);
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    height: 52px !important;
+}
+
+.header.lt-topbar .headerinner {
+    align-items: center;
+    display: flex;
+    height: 52px;
+    padding: 0 22px;
+}
+
+.lt-brand {
+    align-items: center;
+    display: flex;
+    gap: 9px;
+}
+
+/* 应用标记：和 App 图标同一枚印章，笔画已按 18px 调粗 */
+.lt-brand-mark {
+    display: block;
+    height: 18px;
+    width: 18px;
+}
+
+.lt-brand a,
+.lt-brand span {
+    color: var(--lt-text) !important;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-decoration: none;
+}
+
+.lt-brand a:hover {
+    color: var(--lt-muted) !important;
+}
+
+/* 顶栏导航：只有字，当前页用深色字重区分，不做胶囊、不做下划线动画 */
+.lt-nav {
+    align-items: center;
+    display: flex;
+    gap: 22px;
+    margin-left: 30px;
+}
+
+.lt-nav a {
+    color: var(--lt-muted) !important;
+    font-size: 13px;
+    letter-spacing: .02em;
+    text-decoration: none;
+    transition: color .12s ease;
+}
+
+.lt-nav a:hover {
+    color: var(--lt-text) !important;
+}
+
+.lt-nav a.is-active {
+    color: var(--lt-text) !important;
+    font-weight: 600;
+}
+
+/* ── 侧栏：整块不用 ───────────────────────────────────────────────────── */
+.leftpanel,
+.menu-backdrop {
+    display: none !important;
+}
+
+.rightpanel {
+    margin-left: 0 !important;
+    padding-top: 52px !important;
+    background: var(--lt-bg) !important;
+    background-image: none !important;
+    min-height: calc(100vh - 52px) !important;
+}
+
+.primaryContent {
+    min-height: calc(100vh - 52px) !important;
+    padding: 0 !important;
+}
+
+/* ── 去掉页面标题卡与页脚 ─────────────────────────────────────────────── */
+.pageheader {
+    display: none !important;
+}
+
+.footer {
+    display: none !important;
+}
+
+/* ── 卡片：平铺，不要玻璃层 ───────────────────────────────────────────── */
+.maincontent {
+    background: transparent !important;
+    padding: 0 !important;
+}
+
+.maincontentinner,
+.lt-content {
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+/* 日历页内部的图例栏也去掉，让网格真正占满宽度 */
+#my-calendar .lt-content-side--left {
+    display: none !important;
+}
+
+.lt-content-main {
+    padding: 0 22px 6px !important;
+}
+
+/* ── 日历工具条：只保留必要控件 ───────────────────────────────────────── */
+.calendarToolbar {
+    margin: 10px 0 8px !important;
+    padding: 0 !important;
+}
+
+
+/* 导出按钮与「月」下拉的默认样式过重，压平 */
+.calendarToolbar .btn {
+    background: transparent !important;
+    border: 1px solid var(--lt-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: var(--lt-text) !important;
+    height: 30px;
+    padding: 0 10px;
+}
+
+.calendarToolbar .btn:hover {
+    background: var(--lt-hover) !important;
+}
+
+.calendarToolbar .btn-primary,
+.calendarToolbar .btn.btn-primary {
+    background: var(--lt-text) !important;
+    border-color: var(--lt-text) !important;
+    color: #fff !important;
+}
+
+#calendarTitle h2 {
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    letter-spacing: .01em;
+    margin: 0;
+    color: var(--lt-text);
+}
+
+/* 今天 / ‹ / › 这几个 fc-button 也压平 */
+.calendarToolbar .fc-button,
+.calendarToolbar button.fc-today-button {
+    background: transparent !important;
+    border: 1px solid var(--lt-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: var(--lt-text) !important;
+    font-size: 12px !important;
+    height: 30px;
+    padding: 0 10px !important;
+}
+
+.calendarToolbar .fc-button:hover {
+    background: var(--lt-hover) !important;
+}
+
+.calendarToolbar .btn-primary {
+    border-radius: 8px !important;
+    font-size: 12px !important;
+    letter-spacing: .02em;
+}
+
+/* 「月」下拉压平 */
+.calendarToolbar select {
+    background-color: transparent !important;
+    border: 1px solid var(--lt-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: var(--lt-text) !important;
+    font-size: 12px !important;
+    height: 30px;
+    padding: 0 26px 0 10px !important;
+}
+
+/* 导出这类次要动作直接藏掉 */
+.calendarToolbar a[href*="/calendar/export"] {
+    display: none !important;
+}
+
+/* 工具条上的按钮都被外层 flex 撑成整条：一律按内容宽度收回来 */
+.calendarToolbar .btn,
+.calendarToolbar .fc-button {
+    width: auto !important;
+}
+
+.calendarToolbar .btn-primary {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px;
+    padding: 0 14px !important;
+}
+
+/* 翻页只剩两个空方块：没有 Font Awesome 字形，就用文字箭头顶上 */
+.calendarToolbar .fc-prev-button,
+.calendarToolbar .fc-next-button {
+    padding: 0 !important;
+    width: 32px !important;
+}
+
+.calendarToolbar .fc-icon {
+    display: inline-block;
+    font-size: 16px;
+    line-height: 1;
+    opacity: .75;
+}
+
+.calendarToolbar .fc-icon-chevron-left::before {
+    content: "\2039";        /* ‹ */
+}
+
+.calendarToolbar .fc-icon-chevron-right::before {
+    content: "\203A";        /* › */
+}
+
+/* ── 日历网格：细线、无底色 ───────────────────────────────────────────── */
+#calendar .fc-theme-standard td,
+#calendar .fc-theme-standard th,
+#calendar .fc-scrollgrid {
+    border-color: var(--lt-border) !important;
+}
+
+#calendar .fc-col-header-cell {
+    background: transparent !important;
+}
+
+#calendar .fc-daygrid-day:hover {
+    background: #fbfaf9;
+}

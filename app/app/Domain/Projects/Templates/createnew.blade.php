@@ -1,0 +1,40 @@
+<div class="center padding-lg" style="max-width:1200px;">
+
+    <div class="row">
+        <div class="col-md-12">
+            <h1 style="font-size:var(--font-size-xxxl);">{{ __('headlines.create_something_new') }}</h1><br />
+            {!!  __("text.creation_hub") !!}
+
+            <br />
+            <br />
+        </div>
+    </div>
+
+
+    <div class="row">
+
+        @foreach($projectTypes as $projectType)
+        <div class="col-md-4 {{ $projectType["active"] !== true ? "disabled" : "" }}"  >
+            <div class="profileBox">
+
+                <x-global::undrawSvg image="{{ $projectType['image'] }}" headline="{{  __($projectType['label'])  }}" maxWidth="50%" height="150px"></x-global::undrawSvg>
+
+                <br />
+                {!! __($projectType["description"]) !!}
+                <br /><br />
+                @if($projectType["active"] == true )
+                    <x-global::forms.button tag="a" link="{{ BASE_URL }}/{{ $projectType['url'] }}" contentRole="primary">{{  __($projectType['btnLabel'])  }}</x-global::forms.button>
+                @else
+                    <x-global::forms.button tag="a" link="#" contentRole="primary" class="disabled">{{ __('label.not_available_in_plan') }}</x-global::forms.button>
+                @endif
+                <div class="clearall"></div>
+
+            </div>
+
+        </div>
+        @endforeach
+
+    </div>
+
+
+</div>

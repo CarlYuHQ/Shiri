@@ -1,0 +1,2048 @@
+shiri.ticketsController = (function () {
+
+    //Variables
+
+
+    //Functions
+    function countTickets()
+    {
+
+        let ticketCounts = [];
+        jQuery(".sortableTicketList").each(function (indexList) {
+            jQuery(this).find(".column").each(function (indexCol) {
+
+                if (ticketCounts[indexCol] === undefined) {
+                    ticketCounts[indexCol] = 0;
+                }
+
+                var counting = jQuery(this).find('.moveable').length;
+                ticketCounts[indexCol] += counting;
+
+            });
+
+        });
+
+        jQuery(".widgettitle .count").each(function (index) {
+            jQuery(this).text(ticketCounts[index]);
+        });
+
+    }
+
+    /**
+     * Update swimlane row counts after card movement
+     * Counts tickets in each swimlane row and updates the count badges
+     */
+    function updateSwimlaneCounts()
+    {
+        jQuery(".kanban-swimlane-row").each(function() {
+            var $row = jQuery(this);
+            var swimlaneId = $row.attr('id');
+
+            if (!swimlaneId) return;
+
+            // Extract the swimlane identifier from the row ID (e.g., "swimlane-row-3" -> "3")
+            var swimlaneKey = swimlaneId.replace('swimlane-row-', '');
+
+            // Find the swimlane content area and count tickets
+            var $content = $row.find('.kanban-swimlane-content');
+            var ticketCount = $content.find('.moveable').length;
+
+            // Update all count badges in this swimlane's sidebar
+            var $sidebar = $row.find('.kanban-swimlane-sidebar');
+            $sidebar.find('.kanban-lane-count').text(ticketCount);
+
+            // Update the aria-label for accessibility
+            var currentLabel = $sidebar.attr('aria-label') || '';
+            var taskCountLabel = shiri.i18n.__('label.task_count');
+            var taskCountPattern = new RegExp(taskCountLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('%s', '\\d+'));
+            var newLabel = currentLabel.replace(taskCountPattern, taskCountLabel.replace('%s', ticketCount));
+            $sidebar.attr('aria-label', newLabel);
+        });
+
+        // Also update the progress bars
+        updateSwimlaneProgressBars();
+    }
+
+    /**
+     * Update swimlane progress bars after card movement
+     * Recalculates status distribution and updates the micro-progress-bar segments
+     */
+    function updateSwimlaneProgressBars()
+    {
+        jQuery(".kanban-swimlane-row").each(function() {
+            var $row = jQuery(this);
+            var $content = $row.find('.kanban-swimlane-content');
+            var $progressBar = $row.find('.micro-progress-bar .progress-segments');
+
+            if (!$progressBar.length) return;
+
+            // Count tickets per status in this swimlane
+            var statusCounts = {};
+            var totalCount = 0;
+
+            $content.find('.contentInner').each(function() {
+                var $column = jQuery(this);
+                var classAttr = $column.attr('class') || '';
+                var statusMatch = classAttr.match(/status_(-?\d+)/);
+                if (statusMatch) {
+                    var statusId = statusMatch[1];
+                    var ticketCount = $column.find('.moveable').length;
+                    if (ticketCount > 0) {
+                        statusCounts[statusId] = ticketCount;
+                        totalCount += ticketCount;
+                    }
+                }
+            });
+
+            // Get existing segments and their status IDs
+            var $segments = $progressBar.find('.status-segment');
+
+            if (totalCount === 0) {
+                // No tickets - hide all segments
+                $segments.css('flex', '0 1 0%').find('.segment-count').text('');
+                $segments.attr('data-tippy-content', '');
+                return;
+            }
+
+            // Update each segment's flex-grow proportionally
+            $segments.each(function() {
+                var $segment = jQuery(this);
+                var classAttr = $segment.attr('class');
+                if (!classAttr) return;
+
+                var statusMatch = classAttr.match(/status-(-?\d+)/);
+                if (statusMatch) {
+                    var statusId = statusMatch[1];
+                    var count = statusCounts[statusId] || 0;
+                    var percentage = (count / totalCount) * 100;
+
+                    // Use flex-grow proportionally so segments fill 100% without gaps
+                    $segment.css('flex', percentage + ' 1 0%');
+
+                    // Update count text
+                    var $countSpan = $segment.find('.segment-count');
+                    if ($countSpan.length) {
+                        $countSpan.text(count > 0 ? count : '');
+                    }
+
+                    // Update tooltip - only show if count > 0
+                    var currentTooltip = $segment.attr('data-tippy-content') || '';
+                    var labelMatch = currentTooltip.match(/^([^:]+):/);
+                    var label = labelMatch ? labelMatch[1] : shiri.i18n.__('label.status') + ' ' + statusId;
+                    $segment.attr('data-tippy-content', count > 0 ? label + ': ' + count : '');
+                }
+            });
+        });
+    }
+
+    /**
+     * Move a ticket card to a different swimlane when grouped field is changed
+     * @param {number} ticketId - The ticket ID
+     * @param {string|number} newSwimlaneValue - The new swimlane value (priority, milestone, etc.)
+     */
+    var moveCardToSwimlane = function(ticketId, newSwimlaneValue) {
+        // Find the card element
+        var $card = jQuery("#ticket_" + ticketId);
+
+        if (!$card.length) {
+            console.warn("Card not found for ticket ID:", ticketId);
+            return;
+        }
+
+        // Get current status from card's column
+        var $currentColumn = $card.closest('.contentInner');
+        var classAttr = $currentColumn.attr('class') || '';
+        var statusMatch = classAttr.match(/status_(\d+)/);
+
+        if (!statusMatch) {
+            console.warn("Could not determine status for ticket:", ticketId);
+            location.reload(); // Fallback to reload
+            return;
+        }
+
+        var statusId = statusMatch[1];
+
+        // Find target swimlane column
+        var $targetColumn = jQuery("#kanboard-" + newSwimlaneValue + " .contentInner.status_" + statusId);
+
+        if (!$targetColumn.length) {
+            console.warn("Target swimlane not found:", newSwimlaneValue, statusId);
+            location.reload(); // Fallback to reload
+            return;
+        }
+
+        // Don't move if already in correct location
+        if ($currentColumn[0] === $targetColumn[0]) {
+            return;
+        }
+
+        // Add exit animation
+        $card.addClass('card-moving-out');
+
+        setTimeout(function() {
+            // Move card to new swimlane
+            $card.detach().appendTo($targetColumn);
+
+            // Add entrance animation
+            $card.removeClass('card-moving-out').addClass('card-moving-in');
+
+            // Update ticket counts
+            countTickets();
+            updateSwimlaneCounts();
+
+            // Refresh sortable to recalculate positions
+            if ($targetColumn.sortable) {
+                $targetColumn.sortable('refresh');
+            }
+
+            // Remove animation class after transition
+            setTimeout(function() {
+                $card.removeClass('card-moving-in');
+            }, 300);
+        }, 200);
+    };
+
+
+    var updateRemainingHours = function (element, id) {
+        var value = jQuery(element).val();
+        shiri.ticketsRepository.updateRemainingHours(
+            id,
+            value,
+            function () {
+                jQuery.growl({message: shiri.i18n.__("short_notifications.remaining_hours_updated"), style: "success"});
+            }
+        );
+
+    };
+
+    var updatePlannedHours = function (element, id) {
+        var value = jQuery(element).val();
+        shiri.ticketsRepository.updatePlannedHours(
+            id,
+            value,
+            function () {
+                jQuery.growl({message: shiri.i18n.__("short_notifications.planned_hours_updated"), style: "success"});
+            }
+        );
+
+    };
+
+
+    var initGanttChart = function (tasks, viewMode, readonly) {
+
+        function htmlEntities(str)
+        {
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // The Gantt formats month names with Intl.DateTimeFormat, which needs the whole language
+        // code: the first two letters of "kaa" (Karakalpak) are "ka" (Georgian). A code the browser
+        // doesn't support (or that isn't a valid tag) falls back to English.
+        function ganttLanguage()
+        {
+            var languageCode = shiri.i18n.__("language.code");
+
+            try {
+                return Intl.DateTimeFormat.supportedLocalesOf([languageCode]).length > 0 ? languageCode : 'en';
+            } catch (error) {
+                return 'en';
+            }
+        }
+
+        jQuery(document).ready(
+            function () {
+
+                // The Gantt constructor fires on_view_change once while building. Persisting that
+                // event would overwrite the user's saved scale with the default, so ignore any
+                // view change until construction is finished; only user-driven changes save.
+                var ganttInitializing = true;
+
+                if (readonly === false) {
+                    var gantt_chart = new Gantt(
+                        "#gantt",
+                        tasks,
+                        {
+                            header_height: 55,
+                            column_width: 20,
+                            step: 24,
+                            view_modes: ['Day', 'Week', 'Month'],
+                            bar_height: 40,
+                            static_progress_indicator: true,
+                            bar_corner_radius: 10,
+                            arrow_curve: 10,
+                            padding:20,
+                            view_mode: viewMode,
+                            date_format: shiri.i18n.__("language.momentJSDate"),
+                            language: ganttLanguage(),
+                            additional_rows: 5,
+                            custom_popup_html: function (task) {
+
+                                // the task object will contain the updated
+                                // dates and progress value
+                                var end_date = task._end;
+                                var dateObject = new Date(end_date);
+                                var dateTime = jQuery.datepicker.formatDate(shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),  new Date(end_date));
+
+                                var popUpHTML = '<div class="details-container" style="min-width:600px;"> ';
+
+                                if (task.projectName !== undefined) {
+                                    popUpHTML +=  '<h3><b>' + htmlEntities(task.projectName) + '</b></h3>';
+                                }
+                                popUpHTML += '<small>' + htmlEntities(task.type) + ' #' + htmlEntities(task.id) + ' </small>';
+
+                                if (task.type === 'milestone') {
+                                    popUpHTML += '<h4><a href="#/tickets/editMilestone/' + htmlEntities(task.id) + '" >' + htmlEntities(task.name) + '</a></h4><br /> ' +
+                                     '<p>' + shiri.i18n.__("text.expected_to_finish_by") + ' <strong>' + dateTime + '</strong><br /> ' +
+                                     '' + Math.round(task.progress) + '%</p> ' +
+                                     '<a href="#/tickets/editMilestone/' + htmlEntities(task.id) + '" ><span class="fa fa-map"></span> ' + shiri.i18n.__("links.edit_milestone") + '</a> | ' +
+                                     '<a href="' + shiri.appUrl + '/tickets/showKanban?milestone=' + htmlEntities(task.id) + '"><span class="fa-pushpin"></span> ' + shiri.i18n.__("links.view_todos") + '</a> ';
+                                } else {
+                                    popUpHTML += '<h4><a href="#/tickets/showTicket/' + htmlEntities(task.id) + '">' + htmlEntities(task.name) + '</a></h4><br /> ' +
+                                     '<a href="#/tickets/showTicket/' + htmlEntities(task.id) + '"><span class="fa fa-thumb-tack"></span> ' + shiri.i18n.__("links.edit_todo") + '</a> ';
+                                }
+
+                                 popUpHTML += '</div>';
+
+                                return popUpHTML;
+                            },
+                            on_click: function (task) {
+
+                            },
+                            on_date_change: function (task, start, end) {
+
+                                shiri.ticketsRepository.updateMilestoneDates(task.id, start, end, task._index+1);
+
+                            },
+                            on_sort_change: function (tasks) {
+
+                                var sortPayload = {};
+
+                                for (var i = 0; i < tasks.length; i++) {
+                                        //start sorting counter at 1 instead of 0 since 0 will cause date comparison
+                                        sortPayload[tasks[i].id] = tasks[i]._index+1;
+                                }
+
+                                shiri.rpc('Tickets.Tickets.sortTickets', { params: sortPayload })
+                                    .catch(function (error) {
+                                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                                        console.error('Could not sort tickets', error);
+                                    });
+                            },
+                            on_progress_change: function (task, progress) {
+
+                                //_initModals();
+                            },
+                            on_view_change: function (mode) {
+
+                                if (ganttInitializing) { return; }
+                                shiri.usersRepository.updateUserViewSettings("roadmap", mode);
+
+                            },
+                            on_popup_show: function (task) {
+
+                            }
+                        }
+                    );
+                } else {
+                    var gantt_chart = new Gantt(
+                        "#gantt",
+                        tasks,
+                        {
+                            readonlyGantt: true,
+                            resizing: false,
+                            progress: false,
+                            is_draggable: false,
+                            view_modes: ['Day', 'Week', 'Month'],
+                            view_mode: viewMode,
+                            custom_popup_html: function (task) {
+
+
+                                var end_date = task._end;
+                                var dateObject = new Date(end_date);
+                                var dateTime = jQuery.datepicker.formatDate(shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),  new Date(end_date));
+
+                                var popUpHTML = '<div class="details-container" style="min-width:600px;"> ';
+
+                                if (task.projectName !== undefined) {
+                                    popUpHTML +=  '<h3><b>' + htmlEntities(task.projectName) + '</b></h3>';
+                                }
+                                popUpHTML += '<small>' + htmlEntities(task.type) + ' #' + htmlEntities(task.id) + ' </small>';
+
+                                if (task.type === 'milestone') {
+                                    popUpHTML += '<h4>' + htmlEntities(task.name) + '</h4><br /> ' +
+                                        '<p>' + shiri.i18n.__("text.expected_to_finish_by") + ' <strong>' + dateTime + '</strong><br /> ' +
+                                        '' + Math.round(task.progress) + '%</p> ' +
+                                        '<a href="' + shiri.appUrl + '/tickets/showKanban?milestone=' + htmlEntities(task.id) + '"><span class="fa-pushpin"></span> ' + shiri.i18n.__("links.view_todos") + '</a> ';
+                                } else {
+                                    popUpHTML += '<h4><a href="#/tickets/showTicket/' + htmlEntities(task.id) + '">' + htmlEntities(task.name) + '</a></h4><br /> ' +
+                                        '<a href="#/tickets/showTicket/' + htmlEntities(task.id) + '"><span class="fa fa-thumb-tack"></span> ' + shiri.i18n.__("links.edit_todo") + '</a> ';
+                                }
+
+                                popUpHTML += '</div>';
+
+                                return popUpHTML;
+
+                            },
+                            on_click: function (task) {
+
+                            },
+                            on_date_change: function (task, start, end) {
+
+
+                            },
+                            on_progress_change: function (task, progress) {
+
+
+                            },
+                            on_view_change: function (mode) {
+
+                                if (ganttInitializing) { return; }
+                                shiri.usersRepository.updateUserViewSettings("roadmap", mode);
+
+                            }
+                        }
+                    );
+                }
+
+                jQuery("#ganttTimeControl").on(
+                    "click",
+                    "a",
+                    function () {
+
+                        var $btn = jQuery(this);
+                        var mode = $btn.attr("data-value");
+                        gantt_chart.change_view_mode(mode);
+                        $btn.parent().parent().find('a').removeClass('active');
+                        $btn.addClass('active');
+                        var label = $btn.text();
+                        jQuery(".viewText").text(label);
+                    }
+                );
+
+                // Constructor already built the chart at the saved viewMode; construction is done,
+                // so from here on real user-driven view changes are allowed to persist.
+                ganttInitializing = false;
+
+            }
+        );
+
+    };
+
+    var initSprintDates = function () {
+
+        jQuery.datepicker.setDefaults(
+            { beforeShow: function (i) {
+                if (jQuery(i).attr('readonly')) {
+                    return false; } } }
+        );
+
+        var dateFormat = shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+
+            from = jQuery("#sprintStart")
+                .datepicker(
+                    {
+                        numberOfMonths: 1,
+                        dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                        dayNames: shiri.i18n.__("language.dayNames").split(","),
+                        dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                        dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                        monthNames: shiri.i18n.__("language.monthNames").split(","),
+                        currentText: shiri.i18n.__("language.currentText"),
+                        closeText: shiri.i18n.__("language.closeText"),
+                        buttonText: shiri.i18n.__("language.buttonText"),
+                        isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                        nextText: shiri.i18n.__("language.nextText"),
+                        prevText: shiri.i18n.__("language.prevText"),
+                        weekHeader: shiri.i18n.__("language.weekHeader"),
+                        firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                    }
+                )
+                .on(
+                    "change",
+                    function () {
+                        to.datepicker("option", "minDate", getDate(this));
+                        var newEndDate = getDate(this).addDays(13);
+                        to.datepicker('setDate', newEndDate); //set date
+
+                    }
+                ),
+
+            to = jQuery("#sprintEnd").datepicker(
+                {
+                    defaultDate: "+1w",
+                    numberOfMonths: 1,
+                    dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                    dayNames: shiri.i18n.__("language.dayNames").split(","),
+                    dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                    dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                    monthNames: shiri.i18n.__("language.monthNames").split(","),
+                    currentText: shiri.i18n.__("language.currentText"),
+                    closeText: shiri.i18n.__("language.closeText"),
+                    buttonText: shiri.i18n.__("language.buttonText"),
+                    isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                    nextText: shiri.i18n.__("language.nextText"),
+                    prevText: shiri.i18n.__("language.prevText"),
+                    weekHeader: shiri.i18n.__("language.weekHeader"),
+                    firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                }
+            )
+            .on(
+                "change",
+                function () {
+                    from.datepicker("option", "maxDate", getDate(this));
+                }
+            );
+
+        function getDate( element )
+        {
+            var date;
+            try {
+                date = jQuery.datepicker.parseDate(dateFormat, element.value);
+            } catch ( error ) {
+                date = null;
+                console.log(error);
+            }
+
+            return date;
+        }
+    };
+
+    var _initMilestoneDates = function () {
+        var dateFormat = shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+            from = jQuery("#milestoneEditFrom")
+                .datepicker(
+                    {
+                        numberOfMonths: 1,
+                        dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                        dayNames: shiri.i18n.__("language.dayNames").split(","),
+                        dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                        dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                        monthNames: shiri.i18n.__("language.monthNames").split(","),
+                        currentText: shiri.i18n.__("language.currentText"),
+                        closeText: shiri.i18n.__("language.closeText"),
+                        buttonText: shiri.i18n.__("language.buttonText"),
+                        isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                        nextText: shiri.i18n.__("language.nextText"),
+                        prevText: shiri.i18n.__("language.prevText"),
+                        weekHeader: shiri.i18n.__("language.weekHeader"),
+                        firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                    }
+                )
+                .on(
+                    "change",
+                    function () {
+                        to.datepicker("option", "minDate", getDate(this));
+                    }
+                ),
+            to = jQuery("#milestoneEditTo").datepicker(
+                {
+                    defaultDate: "+1w",
+                    numberOfMonths: 1,
+                    dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                    dayNames: shiri.i18n.__("language.dayNames").split(","),
+                    dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                    dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                    monthNames: shiri.i18n.__("language.monthNames").split(","),
+                    currentText: shiri.i18n.__("language.currentText"),
+                    closeText: shiri.i18n.__("language.closeText"),
+                    buttonText: shiri.i18n.__("language.buttonText"),
+                    isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                    nextText: shiri.i18n.__("language.nextText"),
+                    prevText: shiri.i18n.__("language.prevText"),
+                    weekHeader: shiri.i18n.__("language.weekHeader"),
+                    firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                }
+            )
+                .on(
+                    "change",
+                    function () {
+                        from.datepicker("option", "maxDate", getDate(this));
+                    }
+                );
+
+        function getDate( element )
+        {
+            var date;
+            try {
+                date = jQuery.datepicker.parseDate(dateFormat, element.value);
+            } catch ( error ) {
+                date = null;
+                console.log(error);
+            }
+
+            return date;
+        }
+    };
+
+    var initMilestoneDatesAsyncUpdate = function () {
+
+        var dateFormat = shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+            from = jQuery(".milestoneEditFromAsync")
+                .datepicker(
+                    {
+                        numberOfMonths: 1,
+                        dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                        dayNames: shiri.i18n.__("language.dayNames").split(","),
+                        dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                        dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                        monthNames: shiri.i18n.__("language.monthNames").split(","),
+                        currentText: shiri.i18n.__("language.currentText"),
+                        closeText: shiri.i18n.__("language.closeText"),
+                        buttonText: shiri.i18n.__("language.buttonText"),
+                        isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                        nextText: shiri.i18n.__("language.nextText"),
+                        prevText: shiri.i18n.__("language.prevText"),
+                        weekHeader: shiri.i18n.__("language.weekHeader"),
+                        firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                    }
+                )
+                .on(
+                    "change",
+                    function () {
+
+                        var date = jQuery(this).val();
+                        var id = jQuery(this).attr("data-id");
+
+                        var toDatePicker = jQuery(".toDateTicket-" + id);
+                        toDatePicker.datepicker("option", "minDate", getDate(this));
+
+                        var dateTo = jQuery(".toDateTicket-" + id).val();
+
+                        shiri.ticketsRepository.updateEditFromDates(id, date, function() {
+                            jQuery.growl({message: shiri.i18n.__("short_notifications.date_updated"), style: "success"});
+                        });
+
+
+
+
+
+                    }
+                ),
+            to = jQuery(".milestoneEditToAsync").datepicker(
+                {
+                    defaultDate: "+1w",
+                    numberOfMonths: 1,
+                    dateFormat: shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+                    dayNames: shiri.i18n.__("language.dayNames").split(","),
+                    dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+                    dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+                    monthNames: shiri.i18n.__("language.monthNames").split(","),
+                    currentText: shiri.i18n.__("language.currentText"),
+                    closeText: shiri.i18n.__("language.closeText"),
+                    buttonText: shiri.i18n.__("language.buttonText"),
+                    isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+                    nextText: shiri.i18n.__("language.nextText"),
+                    prevText: shiri.i18n.__("language.prevText"),
+                    weekHeader: shiri.i18n.__("language.weekHeader"),
+                    firstDay: shiri.i18n.__("language.firstDayOfWeek"),
+                }
+            )
+                .on(
+                    "change",
+                    function () {
+
+                        var id = jQuery(this).attr("data-id");
+                        var fromDateTicket = jQuery(".fromDateTicket-" + id);
+                        fromDateTicket.datepicker("option", "maxDate", getDate(this));
+
+                        var date = jQuery(this).val();
+
+                        var dateFrom = jQuery(".fromDateTicket-" + id).val();
+
+                        shiri.ticketsRepository.updateEditToDates(id, date, function() {
+                            jQuery.growl({message: shiri.i18n.__("short_notifications.date_updated"), style: "success"});
+                        });
+
+                    }
+                );
+
+        function getDate( element )
+        {
+            var date;
+            try {
+                date = jQuery.datepicker.parseDate(dateFormat, element.value);
+            } catch ( error ) {
+                date = null;
+                console.log(error);
+            }
+
+            return date;
+        }
+    };
+
+    var initToolTips = function () {
+        jQuery('[data-toggle="tooltip"]').tooltip();
+    };
+
+    // Legacy chip binder, kept only for plugin pages (Llamadorian) that still render the old chip
+    // markup. Core chips are <x-global::forms.chip> and are handled by core/chips.js.
+    var initEffortDropdown = function () {
+
+        var storyPointLabels = {
+            '0.5': '< 2min',
+            '1': 'XS',
+            '2': 'S',
+            '3': "M",
+            '5': "L",
+            '8' : "XL",
+            '13': "XXL"
+        };
+
+        jQuery(".effortDropdown .dropdown-menu a").unbind().on("click", function () {
+            if (jQuery(this).closest("[data-lt-chip]").length) {
+                return;
+            }
+
+            var dataValue = jQuery(this).attr("data-value").split("_");
+
+            if (dataValue.length === 2) {
+                var ticketId = dataValue[0];
+                var effortId = dataValue[1];
+
+                shiri.rpc('Tickets.Tickets.patchTicket', { id: ticketId, values: { storypoints: effortId } })
+                    .then(
+                    function () {
+                        jQuery("#effortDropdownMenuLink" + ticketId + " span.text").text(storyPointLabels[effortId]);
+                        jQuery.growl({message: shiri.i18n.__("short_notifications.effort_updated"), style: "success"});
+
+                        // Move card to correct swimlane if grouped by effort
+                        if (shiri.kanbanGroupBy === 'storypoints') {
+                            moveCardToSwimlane(ticketId, effortId);
+                        }
+
+                    }
+                ).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        console.error('Could not update ticket ' + ticketId, error);
+                });
+            } else {
+                console.log("Ticket Controller: Effort data value not set correctly");
+            }
+        });
+
+    };
+
+    // Legacy chip binder, kept only for plugin pages (Llamadorian) that still render the old chip
+    // markup. Core chips are <x-global::forms.chip> and are handled by core/chips.js.
+    var initMilestoneDropdown = function () {
+
+        jQuery(".milestoneDropdown .dropdown-menu a").unbind().on("click", function () {
+            if (jQuery(this).closest("[data-lt-chip]").length) {
+                return;
+            }
+
+                var dataValue = jQuery(this).attr("data-value").split("_");
+                var dataLabel = jQuery(this).attr('data-label');
+
+            if (dataValue.length === 3) {
+                var ticketId = dataValue[0];
+                var milestoneId = dataValue[1];
+                var color = dataValue[2];
+
+                jQuery("#milestoneDropdownMenuLink" + ticketId + " span.text").append(" ...");
+
+                shiri.rpc('Tickets.Tickets.patchTicket', { id: ticketId, values: { milestoneid: milestoneId } })
+                    .then(
+                    function () {
+                        jQuery("#milestoneDropdownMenuLink" + ticketId + " span.text").text(dataLabel);
+                        jQuery("#milestoneDropdownMenuLink" + ticketId).css("backgroundColor", color);
+                        jQuery.growl({message: shiri.i18n.__("short_notifications.milestone_updated"), style: "success"});
+
+                        // Move card to correct swimlane if grouped by milestone
+                        if (shiri.kanbanGroupBy === 'milestoneid') {
+                            moveCardToSwimlane(ticketId, milestoneId);
+                        }
+                    }
+                ).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        console.error('Could not update ticket ' + ticketId, error);
+                });
+            }
+        });
+    };
+
+    /**
+     * A status change to a done status stops the user's timer on that To-Do server-side (#415).
+     * When the header stopwatch shows the timer running on this ticket, ask every timer control
+     * to refresh so the header and the other cards' Start buttons reflect it.
+     */
+    var refreshTimerIfRunningOn = function (ticketId) {
+        var stopTimerLink = document.querySelector('#timerHeadMenu .punchOut');
+        if (!stopTimerLink) {
+            return;
+        }
+
+        var runningTimer = {};
+        try {
+            runningTimer = JSON.parse(stopTimerLink.getAttribute('hx-vals') || '{}');
+        } catch (e) {
+            return;
+        }
+
+        if (String(runningTimer.ticketId) === String(ticketId)) {
+            htmx.trigger(document.body, 'timerUpdate');
+        }
+    };
+
+    // Legacy chip binder, kept only for plugin pages (Llamadorian) that still render the old chip
+    // markup. Core chips are <x-global::forms.chip> and are handled by core/chips.js.
+    var initStatusDropdown = function () {
+
+        jQuery(".statusDropdown .dropdown-menu a").unbind().on("click", function () {
+            if (jQuery(this).closest("[data-lt-chip]").length) {
+                return;
+            }
+
+                var dataValue = jQuery(this).attr("data-value").split("_");
+                var dataLabel = jQuery(this).attr('data-label');
+
+            if (dataValue.length == 3) {
+                var ticketId = dataValue[0];
+                var statusId = dataValue[1];
+                var className = dataValue[2];
+
+                shiri.rpc('Tickets.Tickets.patchTicket', { id: ticketId, values: { status: statusId } })
+                    .then(
+                    function () {
+                        jQuery("#statusDropdownMenuLink" + ticketId + " span.text").text(dataLabel);
+                        jQuery("#statusDropdownMenuLink" + ticketId).removeClass().addClass(className + " dropdown-toggle f-left status ");
+                        jQuery.growl({message: shiri.i18n.__("short_notifications.status_updated"), style: "success"});
+                        refreshTimerIfRunningOn(ticketId);
+
+                    }
+                ).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        console.error('Could not update ticket ' + ticketId, error);
+                });
+            }
+        });
+
+    };
+
+    var initAsyncInputChange = function () {
+
+        jQuery(".asyncInputUpdate").on("change", function () {
+            var dataLabel = jQuery(this).attr('data-label').split("-");
+
+            if (dataLabel.length == 2) {
+                var fieldName = dataLabel[0];
+                var entityId = dataLabel[1];
+                var value = jQuery(this).val();
+
+                shiri.rpc('Tickets.Tickets.patchTicket', { id: entityId, values: { [fieldName]: value } })
+                    .then(
+                    function () {
+                        jQuery.growl({message: shiri.i18n.__("notifications.subtask_saved"), style: "success"});
+                    }
+                ).catch(function (error) {
+                        jQuery.growl({ message: (error && error.message) ? error.message : shiri.i18n.__("short_notifications.not_saved"), style: "error" });
+                        console.error('Could not update ticket ' + entityId, error);
+                });
+            }
+
+        });
+    };
+
+    var initSimpleColorPicker = function () {
+
+            var colors = ['#821219',
+                '#BB1B25',
+                '#75BB1B',
+                '#4B7811',
+                '#fdab3d',
+                '#1bbbb1',
+                '#006d9f',
+                '#124F7D',
+                '#082236',
+                '#5F0F40',
+                '#bb1b75',
+                '#F26CA7',
+                '#BB611B',
+                '#aaaaaa',
+                '#4c4c4c',
+            ];
+            jQuery('input.simpleColorPicker').simpleColorPicker(
+                { colors: colors,
+                    onChangeColor: function (color) {
+                        jQuery(this).css('background', color);
+                        jQuery(this).css('color', "#fff");
+                    }
+                }
+            );
+
+            var currentColor = jQuery('input.simpleColorPicker').val();
+
+        if (currentColor != '') {
+            jQuery('input.simpleColorPicker').css('background', currentColor);
+        }
+
+
+    };
+
+    var initDueDateTimePickers = function () {
+        // Reset due date by clicking a button on the task in the dashboard
+        jQuery(".date-picker-form-control .reset-button").on('click', function () {
+            // Ticket id for api patch call
+            const id = jQuery(this).attr("data-id");
+
+            // Update date input to have "text-anytime" instead of old date
+            jQuery("#due-date-picker-"+id).val(shiri.i18n.__("text.anytime"));
+
+            // Set date to null to reset
+            shiri.ticketsRepository.updateDueDates(id, null, function () {
+                // Notify user that due date is updated
+                jQuery.growl({message: shiri.i18n.__("short_notifications.duedate_updated"), style: "success"});
+            });
+        });
+
+        shiri.dateController.initDatePicker(".quickDueDates, .duedates", function(date, instance) {
+            //TODO: Update to use htmx, this is awful
+            var day = instance.currentDay;
+            var month = instance.currentMonth;
+            var year = instance.currentYear;
+
+            var dateObject = new Date(year, month, day);
+            var parsed = jQuery.datepicker.formatDate(shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"), dateObject);
+
+            var id = jQuery(this).attr("data-id");
+
+            shiri.ticketsRepository.updateDueDates(id, parsed, function () {
+                jQuery.growl({message: shiri.i18n.__("short_notifications.duedate_updated"), style: "success"});
+            });
+
+        });
+
+    };
+
+    var initTimeSheetChart = function (labels, d2, d3, canvasId) {
+
+        var ctx = document.getElementById(canvasId).getContext('2d');
+        var stackedLine = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets:[{
+                    label: shiri.i18n.__("label.booked_hours"),
+                    backgroundColor: 'rgba(201,48,44, 0.5)',
+                    borderColor: 'rgb(201,48,44)',
+                    data:d2
+                },
+                    {
+                        label:shiri.i18n.__("label.planned_hours"),
+                        backgroundColor: 'rgba(54, 162, 235, 0.5)',
+                        borderColor:'rgb(54, 162, 235)',
+                        data:d3
+                }]
+            },
+            options: {
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: shiri.i18n.__("label.booked_hours"),
+                        },
+                        type: 'time',
+                        time: {
+                            unit: 'day'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: shiri.i18n.__("label.planned_hours")
+                        },
+                        ticks: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            }
+        });
+    };
+
+    var colorTicketBoxes = function (currentBox) {
+
+        var color = "#fff";
+        jQuery(".ticketBox").each(function (index) {
+
+            var value = jQuery(this).find(".statusDropdown > a").attr("class");
+
+            if (value != undefined) {
+                if (value.indexOf("important") > -1) {
+                    color = "#b94a48";
+                } else if (value.indexOf("info") > -1) {
+                        color = "#2d6987";
+                } else if (value.indexOf("warning") > -1) {
+                    color = "#f89406";
+                } else if (value.indexOf("success") > -1) {
+                    color = "#468847";
+                } else if (value.indexOf("default") > -1) {
+                    color = "#999999";
+                } else {
+                    color = "#999999";
+                }
+
+                jQuery(this).css("borderLeft", "5px solid " + color);
+
+                if (currentBox != null) {
+                    if (jQuery(this).attr("data-val") == currentBox) {
+                        jQuery("#ticket_" + currentBox + " .ticketBox").animate({backgroundColor: color}, 'fast').animate({backgroundColor: "#fff"}, 'slow');
+                    }
+                }
+            }
+
+        });
+
+    };
+
+    var initTicketTabs = function () {
+
+        jQuery(document).ready(function () {
+
+
+            let url = new URL(window.location.href);
+            let tab = url.searchParams.get("tab");
+
+            let activeTabIndex = 0;
+            if (tab) {
+                activeTabIndex = jQuery('.ticketTabs').find('a[href="#' + tab + '"]').parent().index();
+            }
+
+            jQuery('.ticketTabs').tabs({
+                create: function ( event, ui ) {
+                    jQuery('.ticketTabs').css("visibility", "visible");
+
+                },
+                activate: function (event, ui) {
+
+                    url = new URL(window.location.href);
+
+
+                    url.searchParams.set('tab', ui.newPanel[0].id);
+
+                    window.history.replaceState(null, null, url);
+
+                },
+                load: function () {
+
+                },
+                enable: function () {
+
+                },
+                active: activeTabIndex
+
+            });
+
+
+        });
+
+    };
+
+    var initTicketSearchSubmit = function (url) {
+
+        jQuery("#ticketSearch").on('submit', function (e) {
+            e.preventDefault();
+
+            var project = jQuery("#projectIdInput").val();
+            var users = jQuery("#userSelect").val();
+            var milestones = jQuery("#milestoneSelect").val();
+            var term = jQuery("#termInput").val();
+            var sprints = jQuery("#sprintSelect").val();
+            var types = jQuery("#typeSelect").val();
+            var priority = jQuery("#prioritySelect").val();
+            var status = jQuery("#statusSelect").val();
+            var projects = jQuery("#projectsSelect").val();
+            var sort = jQuery("#sortBySelect").val();
+            var groupBy = jQuery("input[name='groupBy']:checked").val();
+            var showTasks = jQuery("input[name='showTasks']:checked").val();
+
+            // Encode each value: these come from the DOM (filter inputs) and are concatenated
+            // into a URL, so encodeURIComponent keeps special characters (&, #, spaces, commas)
+            // from breaking the query and closes the DOM-text-to-navigation sink.
+            var query = "?search=true";
+            if (project != "" && project != undefined) {
+                query = query + "&projectId=" + encodeURIComponent(project)}
+            if (users != "" && users != undefined) {
+                query = query + "&users=" + encodeURIComponent(users)}
+            if (milestones != ""  && milestones != undefined) {
+                query = query + "&milestone=" + encodeURIComponent(milestones)}
+            if (term != ""  && term != undefined) {
+                query = query + "&term=" + encodeURIComponent(term);}
+            if (sprints != ""  && sprints != undefined) {
+                query = query + "&sprint=" + encodeURIComponent(sprints);}
+            if (types != "" && types != undefined) {
+                query = query + "&type=" + encodeURIComponent(types);}
+            if (priority != "" && priority != undefined) {
+                query = query + "&priority=" + encodeURIComponent(priority);}
+            if (status != "" && status != undefined) {
+                query = query + "&status=" + encodeURIComponent(status);}
+            if (projects != "" && projects != undefined) {
+                query = query + "&projects=" + encodeURIComponent(projects);}
+            if (sort != "" && sort != undefined) {
+                query = query + "&sort=" + encodeURIComponent(sort);}
+            if (groupBy != "" && groupBy != undefined) {
+                query = query + "&groupBy=" + encodeURIComponent(groupBy);}
+            if (showTasks != "" && showTasks != undefined) {
+                query = query + "&showTasks=" + encodeURIComponent(showTasks);}
+
+            var rediredirectUrl = url + query;
+
+            window.location.href = rediredirectUrl;
+
+        });
+    };
+
+    var initTicketSearchUrlBuilder = function (url) {
+
+            var project = jQuery("#projectIdInput").val();
+            var users = jQuery("#userSelect").val();
+            var milestones = jQuery("#milestoneSelect").val();
+            var term = jQuery("#termInput").val();
+            var sprints = jQuery("#sprintSelect").val();
+            var types = jQuery("#typeSelect").val();
+            var priority = jQuery("#prioritySelect").val();
+            var status = jQuery("#statusSelect").val();
+            var projects = jQuery("#projectsSelect").val();
+            var sort = jQuery("#sortBySelect").val();
+            var groupBy = jQuery("input[name='groupBy']:checked").val();
+
+            // Encode each value (DOM-sourced filter inputs concatenated into a URL) — see the
+            // matching note in initTicketSearchSubmit.
+            var query = "?search=true";
+        if (project != "" && project != undefined) {
+            query = query + "&projectId=" + encodeURIComponent(project)}
+        if (users != "" && users != undefined) {
+            query = query + "&users=" + encodeURIComponent(users)}
+        if (milestones != ""  && milestones != undefined) {
+            query = query + "&milestone=" + encodeURIComponent(milestones)}
+        if (term != ""  && term != undefined) {
+            query = query + "&term=" + encodeURIComponent(term);}
+        if (sprints != ""  && sprints != undefined) {
+            query = query + "&sprint=" + encodeURIComponent(sprints);}
+        if (types != "" && types != undefined) {
+            query = query + "&type=" + encodeURIComponent(types);}
+        if (priority != "" && priority != undefined) {
+            query = query + "&priority=" + encodeURIComponent(priority);}
+        if (status != "" && status != undefined) {
+            query = query + "&status=" + encodeURIComponent(status);}
+        if (projects != "" && projects != undefined) {
+            query = query + "&projects=" + encodeURIComponent(projects);}
+        if (sort != "" && sort != undefined) {
+            query = query + "&sort=" + encodeURIComponent(sort);}
+        if (groupBy != "" && groupBy != undefined) {
+            query = query + "&groupBy=" + encodeURIComponent(groupBy);}
+
+            var rediredirectUrl = url + query;
+
+            window.location.href = rediredirectUrl;
+
+    };
+
+    var setUpKanbanColumns = function () {
+
+        jQuery(document).ready(function () {
+
+            countTickets();
+            updateSwimlaneCounts();
+
+            jQuery(".filterBar .row-fluid").css("opacity", "1");
+
+            jQuery(".sortableTicketList").each(function(){
+
+                let kanbanLaneId = jQuery(this).attr("id");
+
+                // Skip collapsed swimlanes - let CSS handle their height
+                var swimlaneRow = jQuery(this).closest('.kanban-swimlane-row');
+                if (swimlaneRow.length && swimlaneRow.attr('data-expanded') === 'false') {
+                    return;
+                }
+
+                let height = 250;
+
+                jQuery(this).find(".column .contentInner").each(function () {
+                    if (jQuery(this).height() > height) {
+                        height = jQuery(this).height();
+                    }
+                });
+
+                jQuery("#"+kanbanLaneId+" .column .contentInner").css("height", height);
+
+            });
+
+        });
+
+    }
+
+    /**
+     * @param {string[]} ticketStatusListParameter status keys of the board columns
+     * @param {Object} [options]
+     * @param {boolean} [options.manualSort=true] false when the board is sorted by a field (#1536):
+     *        dragging then only changes status, never the stored manual order.
+     */
+    var initTicketKanban = function (ticketStatusListParameter, options) {
+
+        var ticketStatusList = ticketStatusListParameter;
+        var manualSort = !options || options.manualSort !== false;
+
+        jQuery(".sortableTicketList.kanbanBoard .ticketBox").hover(function () {
+            jQuery(this).css("background", "var(--kanban-card-hover)");
+        },function () {
+            jQuery(this).css("background", "var(--kanban-card-bg)");
+        });
+
+        var position_updated = false;
+
+        jQuery(".sortableTicketList").each(function () {
+
+            var currentElement = this;
+
+            jQuery(currentElement).find(".contentInner").sortable({
+                connectWith: ".contentInner",
+                items: "> .moveable",
+                tolerance: 'intersect',
+                placeholder: "ui-state-highlight",
+                forcePlaceholderSize: true,
+                cancel: ".portlet-toggle,:input,a,input",
+                distance: 10,
+
+                start: function (event, ui) {
+                    ui.item.addClass('tilt');
+                    tilt_direction(ui.item);
+
+                    // Store original swimlane for cross-swimlane detection
+                    var $originalSwimlane = ui.item.closest('.sortableTicketList.kanbanBoard');
+                    ui.item.data('originalSwimlaneId', $originalSwimlane.attr('id'));
+                    ui.item.data('originalColumn', ui.item.parent()[0]);
+                },
+                stop: function (event, ui) {
+                    ui.item.removeClass("tilt");
+                    jQuery("html").unbind('mousemove', ui.item.data("move_handler"));
+                    ui.item.removeData("move_handler");
+
+                    // Sorted by a field: the order inside a column follows that field, so a drop
+                    // back into the same column is undone instead of saved (#1536).
+                    var droppedInSameColumn = ui.item.parent()[0] === ui.item.data('originalColumn');
+                    ui.item.removeData('originalColumn');
+                    if (!manualSort && droppedInSameColumn) {
+                        jQuery(this).sortable('cancel');
+                        ui.item.removeData('originalSwimlaneId');
+                        return;
+                    }
+
+                    countTickets();
+                    updateSwimlaneCounts();
+
+                    // Update empty state for all columns after drag-and-drop
+                    jQuery(".sortableTicketList").find(".contentInner").each(function() {
+                        var $container = jQuery(this);
+                        var hasTickets = $container.find(".moveable").length > 0;
+
+                        if (hasTickets) {
+                            // Column has tickets - remove empty state
+                            $container.removeClass("empty-column");
+                            $container.attr("data-empty-text", "");
+                            var currentLabel = $container.attr("aria-label") || "";
+                            $container.attr("aria-label", shiri.i18n.__("label.column_items").replace("%s", currentLabel.replace(shiri.i18n.__("label.empty_column"), "")));
+                        } else {
+                            // Column is empty - add empty state
+                            $container.addClass("empty-column");
+                            $container.attr("data-empty-text", "Empty");
+                            $container.attr("aria-label", shiri.i18n.__("label.empty_column"));
+                        }
+                    });
+
+                    // Every write triggered by this drop; a field-sorted board reloads once all settled.
+                    var pendingWrites = [];
+
+                    // Detect cross-swimlane movement and update groupBy field
+                    var $newSwimlane = ui.item.closest('.sortableTicketList.kanbanBoard');
+                    var newSwimlaneId = $newSwimlane.attr('id');
+                    var originalSwimlaneId = ui.item.data('originalSwimlaneId');
+
+                    if (originalSwimlaneId && newSwimlaneId && originalSwimlaneId !== newSwimlaneId) {
+                        // Card moved to different swimlane - update the groupBy field
+                        var ticketId = ui.item[0].id.replace('ticket_', '');
+                        var newGroupValue = newSwimlaneId.replace('kanboard-', '');
+
+                        // Map groupBy values to API field names
+                        var groupByFieldMap = {
+                            'milestoneid': 'milestoneid',
+                            'editorId': 'editorId',
+                            'priority': 'priority',
+                            'storypoints': 'storypoints',
+                            'sprint': 'sprint',
+                            'dueDate': 'dateToFinish'
+                        };
+
+                        var groupBy = shiri.kanbanGroupBy;
+                        var fieldName = groupByFieldMap[groupBy];
+
+                        // Special handling for dueDate - calculate actual date from bucket ID
+                        if (groupBy === 'dueDate') {
+                            var today = new Date();
+                            today.setHours(12, 0, 0, 0); // Set to noon to avoid timezone issues
+
+                            // Bucket IDs: 0=overdue, 1=due-this-week, 2=due-next-week, 3=due-later, 4=no-due-date
+                            switch (newGroupValue) {
+                                case '0': // Overdue - set to yesterday
+                                    var yesterday = new Date(today);
+                                    yesterday.setDate(yesterday.getDate() - 1);
+                                    newGroupValue = yesterday.toISOString().split('T')[0];
+                                    break;
+                                case '1': // Due This Week - set to end of this week (Saturday)
+                                    var endOfWeek = new Date(today);
+                                    var daysUntilSaturday = 6 - endOfWeek.getDay();
+                                    if (daysUntilSaturday < 0) daysUntilSaturday = 0;
+                                    endOfWeek.setDate(endOfWeek.getDate() + daysUntilSaturday);
+                                    newGroupValue = endOfWeek.toISOString().split('T')[0];
+                                    break;
+                                case '2': // Due Next Week - set to next week Saturday
+                                    var nextWeekEnd = new Date(today);
+                                    var daysUntilNextSaturday = 6 - nextWeekEnd.getDay() + 7;
+                                    nextWeekEnd.setDate(nextWeekEnd.getDate() + daysUntilNextSaturday);
+                                    newGroupValue = nextWeekEnd.toISOString().split('T')[0];
+                                    break;
+                                case '3': // Due Later - set to 3 weeks from now
+                                    var later = new Date(today);
+                                    later.setDate(later.getDate() + 21);
+                                    newGroupValue = later.toISOString().split('T')[0];
+                                    break;
+                                case '4': // No Due Date - clear the date
+                                    newGroupValue = '';
+                                    break;
+                            }
+                        }
+
+                        if (fieldName && ticketId) {
+                            var $card = jQuery('#ticket_' + ticketId);
+
+                            // OPTIMISTIC UI UPDATE - update visuals immediately before server confirms
+                            if (groupBy === 'milestoneid') {
+                                // Find the new swimlane's label for the milestone
+                                var $newSwimlaneHeader = jQuery('#swimlane-row-' + newGroupValue + ' .swimlane-header-label');
+                                var newLabel = $newSwimlaneHeader.text() || shiri.i18n.__("label.no_milestone");
+
+                                // Update milestone dropdown on card
+                                var $milestoneDropdown = $card.find('.milestoneDropdown .dropdown-toggle .text');
+                                if ($milestoneDropdown.length) {
+                                    $milestoneDropdown.text(newLabel);
+                                }
+
+                                // The milestone's color is on its chip option.
+                                var $milestoneMenuItem = $card.find('.milestoneDropdown .dropdown-menu a[data-value="' + newGroupValue + '"]');
+                                var milestoneColor = $milestoneMenuItem.attr('data-color') || '#b0b0b0'; // gray = "No Milestone"
+
+                                // Update the dropdown toggle background color
+                                $card.find('.milestoneDropdown .dropdown-toggle').css('background-color', milestoneColor);
+
+                            } else if (groupBy === 'priority') {
+                                // Update priority border and dropdown on card
+                                $card.removeClass(function(index, className) {
+                                    return (className.match(/(^|\s)priority-border-\S+/g) || []).join(' ');
+                                }).addClass('priority-border-' + newGroupValue);
+
+                                // Update priority dropdown text and background
+                                var priorityLabels = {'1': 'Critical', '2': 'High', '3': 'Medium', '4': 'Low', '5': 'Lowest'};
+                                var $priorityDropdown = jQuery('#priorityDropdownMenuLink' + ticketId);
+                                if ($priorityDropdown.length) {
+                                    $priorityDropdown.find('span.text').text(priorityLabels[newGroupValue] || newGroupValue);
+                                    $priorityDropdown.removeClass('priority-bg-1 priority-bg-2 priority-bg-3 priority-bg-4 priority-bg-5');
+                                    $priorityDropdown.addClass('priority-bg-' + newGroupValue);
+                                }
+
+                            } else if (groupBy === 'editorId') {
+                                // Update user dropdown on card
+                                var $userDropdown = jQuery('#userDropdownMenuLink' + ticketId);
+                                if ($userDropdown.length) {
+                                    // Update user image
+                                    $userDropdown.find('span.text span img').attr('src', shiri.appUrl + '/users/profileImage/' + newGroupValue);
+
+                                    // Get the new user's name from swimlane header
+                                    var $newSwimlaneHeader = jQuery('#swimlane-row-' + newGroupValue + ' .swimlane-header-label');
+                                    var newUserName = $newSwimlaneHeader.text() || shiri.i18n.__("label.not_assigned_to_user");
+                                    $userDropdown.find('span.text span#user' + ticketId).text(newUserName);
+                                }
+
+                            } else if (groupBy === 'storypoints') {
+                                // Update effort dropdown on card
+                                var storyPointLabels = {'0.5': '< 2min', '1': 'XS', '2': 'S', '3': 'M', '5': 'L', '8': 'XL', '13': 'XXL'};
+                                var $effortDropdown = jQuery('#effortDropdownMenuLink' + ticketId);
+                                if ($effortDropdown.length) {
+                                    $effortDropdown.find('span.text').text(storyPointLabels[newGroupValue] || newGroupValue);
+                                }
+
+                            } else if (groupBy === 'sprint') {
+                                // Update sprint dropdown on card
+                                var $sprintDropdown = jQuery('#sprintDropdownMenuLink' + ticketId);
+                                if ($sprintDropdown.length) {
+                                    // Get the new sprint's name from swimlane header
+                                    var $newSwimlaneHeader = jQuery('#swimlane-row-' + newGroupValue + ' .swimlane-header-label');
+                                    var newSprintName = $newSwimlaneHeader.text() || shiri.i18n.__("label.backlog");
+                                    $sprintDropdown.find('span.text').text(newSprintName);
+                                }
+
+                            } else if (groupBy === 'dueDate') {
+                                // Update due date display on card
+                                var $dateDisplay = $card.find('.dues .fa-calendar').parent();
+                                if ($dateDisplay.length && newGroupValue) {
+                                    // Format the date for display (MM/DD/YYYY)
+                                    var dateParts = newGroupValue.split('-');
+                                    var formattedDate = dateParts[1] + '/' + dateParts[2] + '/' + dateParts[0];
+                                    $dateDisplay.contents().filter(function() {
+                                        return this.nodeType === 3; // Text nodes only
+                                    }).first().replaceWith(' ' + formattedDate);
+                                } else if ($dateDisplay.length && !newGroupValue) {
+                                    // Clear the date display for "No Due Date"
+                                    $dateDisplay.contents().filter(function() {
+                                        return this.nodeType === 3;
+                                    }).first().replaceWith(' ' + shiri.i18n.__("text.no_due_date"));
+                                }
+                            }
+
+                            // Show success notification immediately for better perceived speed
+                            jQuery.growl({message: shiri.i18n.__("short_notifications.todo_updated"), style: "success"});
+
+                            var swimlaneValues = {};
+                            swimlaneValues[fieldName] = newGroupValue;
+
+                            // PATCH the ticket with the new swimlane value (confirmation happens in background)
+                            var swimlaneWrite = shiri.rpc('Tickets.Tickets.patchTicket', { id: ticketId, values: swimlaneValues });
+                            pendingWrites.push(swimlaneWrite);
+                            swimlaneWrite
+                                .catch(function() {
+                                    jQuery.growl({message: shiri.i18n.__("short_notifications.not_saved") || "Error updating ticket", style: "error"});
+                                    // Reload on failure to restore correct state
+                                    location.reload();
+                                });
+                        }
+                    }
+
+                    // Clean up stored data
+                    ui.item.removeData('originalSwimlaneId');
+
+                    // Get the new parent swimlane for status update
+                    var $targetSwimlane = ui.item.closest('.sortableTicketList');
+
+                    var sortPayload = {};
+                    var sortHandler = ui.item[0].id;
+
+
+                    for (var i = 0; i < ticketStatusList.length; i++) {
+                        if ($targetSwimlane.find(".contentInner.status_" + ticketStatusList[i]).length) {
+                            sortPayload[ticketStatusList[i]] = $targetSwimlane.find(".contentInner.status_" + ticketStatusList[i]).sortable('serialize');
+                        }
+                    }
+
+                    var statusWrite = shiri.rpc('Tickets.Tickets.updateTicketStatusAndSorting', { params: sortPayload, handler: sortHandler, preserveSortIndex: !manualSort });
+                    pendingWrites.push(statusWrite);
+                    statusWrite
+                        .then(function () {
+                            refreshTimerIfRunningOn(String(sortHandler).replace('ticket_', ''));
+                        })
+                        .catch(function (error) {
+                            console.error('Could not update ticket status and sorting', error);
+                        });
+
+                    // Field-sorted board (#1536): the card sits where it was dropped, not at its sorted
+                    // position. Once the status (and any swimlane) write has settled, reload so every
+                    // column follows the sort again (a failed write also needs the reload to recover).
+                    if (!manualSort) {
+                        Promise.allSettled(pendingWrites).then(function () {
+                            location.reload();
+                        });
+                    }
+
+                }
+            });
+
+        });
+
+        function tilt_direction(item)
+        {
+            var left_pos = item.position().left,
+                move_handler = function (e) {
+
+                    if ((e.pageX + 5) > left_pos) {
+                        item.addClass("right");
+                        item.removeClass("left");
+                    } else if (e.pageX < (left_pos + 5)) {
+                        item.addClass("left");
+                        item.removeClass("right");
+                    } else {
+                        item.removeClass("left");
+                        item.removeClass("right");
+                    }
+
+                    left_pos = e.pageX;
+
+                };
+            jQuery("html").bind("mousemove", move_handler);
+            item.data("move_handler", move_handler);
+        }
+
+        jQuery(".portlet")
+            .addClass("ui-widget ui-widget-content ui-helper-clearfix ui-corner-all")
+            .find(".portlet-header")
+            .addClass("ui-widget-header ui-corner-all")
+            .prepend("<span class='ui-icon ui-icon-minusthick portlet-toggle'></span>");
+
+        jQuery(".portlet-toggle").click(function () {
+            var icon = jQuery(this);
+            icon.toggleClass("ui-icon-minusthick ui-icon-plusthick");
+            icon.closest(".portlet").find(".portlet-content").toggle();
+        });
+
+    };
+
+    /**
+     * Grouped table views render one DataTable per group, but only the first table drives the
+     * column picker. Each table also state-saves its own column visibility, so on load copy the
+     * first table's visibility to the other groups and keep them in sync afterwards (#2235).
+     */
+    var syncGroupedColumnVisibility = function (allTickets) {
+
+        var tableCount = allTickets.tables().context.length;
+
+        if (tableCount < 2) {
+            return;
+        }
+
+        var applyToOtherTables = function (colIdx, visibility) {
+            for (var i = 1; i < tableCount; i++) {
+                allTickets.table(i).column(colIdx).visible(visibility, false);
+            }
+        };
+
+        allTickets.table(0).columns().every(function (colIdx) {
+            applyToOtherTables(colIdx, this.visible());
+        });
+        allTickets.columns.adjust().draw(false);
+
+        allTickets.table(0).on(
+            'column-visibility',
+            function ( e, settings, colIdx, visibility ) {
+                applyToOtherTables(colIdx, visibility);
+                allTickets.columns.adjust().draw(false);
+            }
+        );
+    };
+
+    var initTicketsTable = function (groupBy) {
+
+        function isNumeric(n)
+        {
+            return !isNaN(parseFloat(n)) && isFinite(n);
+        }
+
+        jQuery(document).ready(function () {
+
+            var size = 100;
+            var columnIndex = false;
+
+
+            var defaultOrder = [];
+
+            var allTickets = jQuery(".ticketTable").DataTable({
+                "language": {
+                    "decimal":        shiri.i18n.__("datatables.decimal"),
+                    "emptyTable":     shiri.i18n.__("datatables.emptyTable"),
+                    "info":           shiri.i18n.__("datatables.info"),
+                    "infoEmpty":      shiri.i18n.__("datatables.infoEmpty"),
+                    "infoFiltered":   shiri.i18n.__("datatables.infoFiltered"),
+                    "infoPostFix":    shiri.i18n.__("datatables.infoPostFix"),
+                    "thousands":      shiri.i18n.__("datatables.thousands"),
+                    "lengthMenu":     shiri.i18n.__("datatables.lengthMenu"),
+                    "loadingRecords": shiri.i18n.__("datatables.loadingRecords"),
+                    "processing":     shiri.i18n.__("datatables.processing"),
+                    "search":         shiri.i18n.__("datatables.search"),
+                    "zeroRecords":    shiri.i18n.__("datatables.zeroRecords"),
+                    "paginate": {
+                        "first":      shiri.i18n.__("datatables.first"),
+                        "last":       shiri.i18n.__("datatables.last"),
+                        "next":       shiri.i18n.__("datatables.next"),
+                        "previous":   shiri.i18n.__("datatables.previous"),
+                    },
+                    "aria": {
+                        "sortAscending":  shiri.i18n.__("datatables.sortAscending"),
+                        "sortDescending":shiri.i18n.__("datatables.sortDescending"),
+                    },
+                    "buttons": {
+                        colvis: shiri.i18n.__("datatables.buttons.colvis"),
+                        csv: shiri.i18n.__("datatables.buttons.download")
+                    }
+
+                },
+                "dom": '<"top">rt<"bottom">p<"clear">',
+                "searching": false,
+                "stateSave": true,
+                "displayLength":100,
+                "order": defaultOrder,
+                "columnDefs": [
+                        { "visible": false, "targets": 10 },
+                        { "visible": false, "targets": 11 },
+                        { "target": "no-sort", "orderable": false},
+                        // Plain-text description: never shown in the table, only exported to CSV (#786).
+                        { "visible": false, "orderable": false, "targets": "description-col" },
+                    ],
+                "footerCallback": function ( row, data, start, end, display ) {
+                    var api = this.api(), data;
+
+                    // converting to interger to find total
+                    var intVal = function ( i ) {
+                        return typeof i === 'string' ?
+                            i.replace(/[\$,]/g, '') * 1 :
+                            typeof i === 'number' ?
+                        i : 0;
+                    };
+
+                    // computing column Total of the complete result
+
+
+                    var plannedHours = api
+                        .column(10)
+                        .data()
+                        .reduce(function (a, b) {
+
+                            if (isNumeric(a) === false) {
+                                a = jQuery(a).val();
+                            }
+
+                            if (isNumeric(b) === false) {
+                                b = jQuery(b).val();
+                            }
+
+                            if (isNaN(a)) {
+                                a = 0; }
+                            if (isNaN(b)) {
+                                b = 0; }
+
+
+                            return parseFloat(a) + parseFloat(b);
+                        }, 0);
+
+                    var hoursLeft = api
+                        .column(11)
+                        .data()
+                        .reduce(function (a, b) {
+
+                            if (isNumeric(a) === false) {
+                                a = jQuery(a).val();
+                            }
+
+                            if (isNumeric(b) === false) {
+                                b = jQuery(b).val();
+                            }
+
+                            if (isNaN(a)) {
+                                a = 0; }
+                            if (isNaN(b)) {
+                                b = 0; }
+
+
+                            return parseFloat(a) + parseFloat(b);
+                        }, 0);
+
+                    var loggedHours = api
+                        .column(12)
+                        .data()
+                        .reduce(function (a, b) {
+                            return parseFloat(a) + parseFloat(b);
+                        }, 0);
+
+
+                    // Update footer by showing the total with the reference of the column index
+                    jQuery(api.column(9).footer()).html(shiri.i18n.__("label.total"));
+                    jQuery(api.column(10).footer()).html(plannedHours);
+                    jQuery(api.column(11).footer()).html(hoursLeft);
+                    jQuery(api.column(12).footer()).html(loggedHours);
+
+                },
+
+            });
+
+            var buttons = new jQuery.fn.dataTable.Buttons(allTickets.table(0), {
+                buttons: [
+                    {
+                        extend: 'csvHtml5',
+                        title: shiri.i18n.__("label.filename_fileexport"),
+                        charset: 'utf-8',
+                        bom: true,
+                        exportOptions: {
+                            // Skip the unlabelled per-row actions menu (.no-sort): it has no export value and
+                            // dumped its menu markup into every CSV row (#2042, #2192).
+                            columns: ':not(.no-sort)',
+                            format: {
+                                body: function ( data, row, column, node ) {
+
+                                    // data-export: readable value when the sort key is numeric (priority, effort),
+                                    // or a formula-safe value (description). attr(), not data(): data() would
+                                    // JSON-parse text that looks like an object/array/number.
+                                    if ( typeof jQuery(node).attr('data-export') !== 'undefined') {
+                                        return jQuery(node).attr('data-export');
+                                    }
+                                    if ( typeof jQuery(node).data('order') !== 'undefined') {
+                                        return jQuery(node).data('order');
+                                    }
+
+                                    // No explicit export value: export the visible text, never raw HTML.
+                                    return jQuery('<div>').html(data).text().replace(/\s+/g, ' ').trim();
+                                }
+                            }
+                        }
+                },
+                {
+                    extend: 'colvis',
+                    columns: ':not(.noVis)'
+                }
+                ]
+            }).container().appendTo(jQuery('#tableButtons'));
+
+            syncGroupedColumnVisibility(allTickets);
+
+            jQuery('.ticketTable input').on('change', function ( e, settings, column, state ) {
+
+                jQuery(this).parent().attr('data-order',jQuery(this).val());
+                allTickets.draw();
+
+            });
+        });
+    };
+
+    var initTicketsList = function (groupBy) {
+
+        jQuery(document).ready(function () {
+
+            var size = 50;
+            var columnIndex = false;
+            var collapsedGroups = {};
+
+            var defaultOrder = [];
+
+
+            var allTickets = jQuery(".listStyleTable").DataTable({
+                "language": {
+                    "decimal":        shiri.i18n.__("datatables.decimal"),
+                    "emptyTable":     shiri.i18n.__("datatables.emptyTable"),
+                    "info":           shiri.i18n.__("datatables.info"),
+                    "infoEmpty":      shiri.i18n.__("datatables.infoEmpty"),
+                    "infoFiltered":   shiri.i18n.__("datatables.infoFiltered"),
+                    "infoPostFix":    shiri.i18n.__("datatables.infoPostFix"),
+                    "thousands":      shiri.i18n.__("datatables.thousands"),
+                    "lengthMenu":     shiri.i18n.__("datatables.lengthMenu"),
+                    "loadingRecords": shiri.i18n.__("datatables.loadingRecords"),
+                    "processing":     shiri.i18n.__("datatables.processing"),
+                    "search":         shiri.i18n.__("datatables.search"),
+                    "zeroRecords":    shiri.i18n.__("datatables.zeroRecords"),
+                    "paginate": {
+                        "first":      shiri.i18n.__("datatables.first"),
+                        "last":       shiri.i18n.__("datatables.last"),
+                        "next":       shiri.i18n.__("datatables.next"),
+                        "previous":   shiri.i18n.__("datatables.previous"),
+                    },
+                    "aria": {
+                        "sortAscending":  shiri.i18n.__("datatables.sortAscending"),
+                        "sortDescending":shiri.i18n.__("datatables.sortDescending"),
+                    },
+                    "buttons": {
+                        colvis: shiri.i18n.__("datatables.buttons.colvis"),
+                        csv: shiri.i18n.__("datatables.buttons.download")
+                    }
+
+                },
+                "dom": '<"top">rt<"bottom"<"center"p>><"clear">',
+                "searching": false,
+                "stateSave": true,
+                "displayLength":25,
+                "order": defaultOrder,
+                "fnDrawCallback": function (oSettings) {
+
+                    if (oSettings._iDisplayLength > oSettings.fnRecordsDisplay()) {
+                        jQuery(oSettings.nTableWrapper).find('.dataTables_paginate').hide();
+                    } else {
+                        jQuery(oSettings.nTableWrapper).find('.dataTables_paginate').show();
+                    }
+
+                }
+            });
+
+
+        });
+    };
+
+    var initMilestoneTable = function (groupBy) {
+
+        function isNumeric(n)
+        {
+            return !isNaN(parseFloat(n)) && isFinite(n);
+        }
+
+        jQuery(document).ready(function () {
+
+            var size = 100;
+            var columnIndex = false;
+
+
+            var defaultOrder = [];
+
+            var allTickets = jQuery(".ticketTable").DataTable({
+                "language": {
+                    "decimal":        shiri.i18n.__("datatables.decimal"),
+                    "emptyTable":     shiri.i18n.__("datatables.emptyTable"),
+                    "info":           shiri.i18n.__("datatables.info"),
+                    "infoEmpty":      shiri.i18n.__("datatables.infoEmpty"),
+                    "infoFiltered":   shiri.i18n.__("datatables.infoFiltered"),
+                    "infoPostFix":    shiri.i18n.__("datatables.infoPostFix"),
+                    "thousands":      shiri.i18n.__("datatables.thousands"),
+                    "lengthMenu":     shiri.i18n.__("datatables.lengthMenu"),
+                    "loadingRecords": shiri.i18n.__("datatables.loadingRecords"),
+                    "processing":     shiri.i18n.__("datatables.processing"),
+                    "search":         shiri.i18n.__("datatables.search"),
+                    "zeroRecords":    shiri.i18n.__("datatables.zeroRecords"),
+                    "paginate": {
+                        "first":      shiri.i18n.__("datatables.first"),
+                        "last":       shiri.i18n.__("datatables.last"),
+                        "next":       shiri.i18n.__("datatables.next"),
+                        "previous":   shiri.i18n.__("datatables.previous"),
+                    },
+                    "aria": {
+                        "sortAscending":  shiri.i18n.__("datatables.sortAscending"),
+                        "sortDescending":shiri.i18n.__("datatables.sortDescending"),
+                    },
+                    "buttons": {
+                        colvis: shiri.i18n.__("datatables.buttons.colvis"),
+                        csv: shiri.i18n.__("datatables.buttons.download")
+                    }
+
+                },
+                "dom": '<"top">rt<"bottom"><"clear">',
+                "searching": false,
+                "stateSave": true,
+                "displayLength":100,
+                "order": defaultOrder,
+                "columnDefs": [
+                    { "visible": false, "targets": 7 },
+                    { "visible": false, "targets": 8 },
+                    { "target": "no-sort", "orderable": false},
+                ]
+
+            });
+
+            var buttons = new jQuery.fn.dataTable.Buttons(allTickets.table(0), {
+                buttons: [
+                    {
+                        extend: 'csvHtml5',
+                        title: shiri.i18n.__("label.filename_fileexport"),
+                        charset: 'utf-8',
+                        bom: true,
+                        exportOptions: {
+                            // Skip the unlabelled per-row actions menu (.no-sort): it has no export value and
+                            // dumped its menu markup into every CSV row (#2042, #2192).
+                            columns: ':not(.no-sort)',
+                            format: {
+                                body: function ( data, row, column, node ) {
+
+                                    // data-export: readable value when the sort key is numeric (priority, effort),
+                                    // or a formula-safe value (description). attr(), not data(): data() would
+                                    // JSON-parse text that looks like an object/array/number.
+                                    if ( typeof jQuery(node).attr('data-export') !== 'undefined') {
+                                        return jQuery(node).attr('data-export');
+                                    }
+                                    if ( typeof jQuery(node).data('order') !== 'undefined') {
+                                        return jQuery(node).data('order');
+                                    }
+
+                                    // No explicit export value: export the visible text, never raw HTML.
+                                    return jQuery('<div>').html(data).text().replace(/\s+/g, ' ').trim();
+                                }
+                            }
+                        }
+                },
+                    {
+                        extend: 'colvis',
+                        columns: ':not(.noVis)'
+                }
+                ]
+            }).container().appendTo(jQuery('#tableButtons'));
+
+            syncGroupedColumnVisibility(allTickets);
+
+            jQuery('.ticketTable input').on('change', function ( e, settings, column, state ) {
+
+                jQuery(this).parent().attr('data-order',jQuery(this).val());
+                allTickets.draw();
+
+            });
+
+        });
+    };
+
+    var loadTicketToContainer = function (id, element) {
+
+        // Destroy any Tiptap editors before loading new content
+        if (window.shiri && window.shiri.tiptapController && window.shiri.tiptapController.registry) {
+            shiri.tiptapController.registry.destroyAll();
+        }
+
+        jQuery(".ticketRows").removeClass("active");
+        jQuery("#row-" + id).addClass("active");
+
+        var loadingHtml = "<div class='center'><img src='" + shiri.appUrl + "/dist/images/svg/loading-animation.svg' width='100px' /></div>";
+
+        // The detail goes in with jQuery, not htmx: release the old content's enhanced selects
+        // (their dropdown panels sit on <body>) before replacing it.
+        function replaceContent(html)
+        {
+            var container = jQuery(element)[0];
+            if (container && shiri.selectController) {
+                shiri.selectController.destroyWithin(container);
+            }
+            jQuery(element).html(html);
+        }
+
+        // ... and initialize the new content the way an htmx swap would (selects, tags, dates).
+        function showTicket(html)
+        {
+            replaceContent(html);
+            shiri.initLoadedContent(jQuery(element)[0]);
+            formSubmitHandler(element);
+        }
+
+        replaceContent(loadingHtml);
+
+        function formSubmitHandler(element)
+        {
+
+            jQuery(element).find("form").each(function () {
+
+                jQuery(this).on("submit", function (e) {
+
+                    e.preventDefault();
+
+                    // Destroy any Tiptap editors before submitting
+                    if (window.shiri && window.shiri.tiptapController && window.shiri.tiptapController.registry) {
+                        shiri.tiptapController.registry.destroyAll();
+                    }
+
+                    var data = jQuery(this).serialize();
+                    var action = jQuery(this).attr("action");
+
+                    replaceContent(loadingHtml);
+
+                    jQuery.ajax({
+                        url: action,
+                        data: data,
+                        type: "post",
+                        success: function (data) {
+
+                            showTicket(data);
+
+                        },
+                        error: function () {
+
+                        }
+                    });
+                });
+
+            });
+        }
+
+
+
+        jQuery.get(shiri.appUrl + '/tickets/showTicket/' + id, function ( data ) {
+
+            showTicket(data);
+
+        });
+
+    };
+
+
+    var addCommentTimesheetContent = function (commentId, taskId) {
+        var content = shiri.i18n.__("text.discussion_on_todo").replace("%s", taskId)
+        + "\n\r"
+        + jQuery("#commentText-" + commentId).text();
+
+        jQuery('li a[href*="timesheet"]').click();
+
+        jQuery("#timesheet #description").val(content);
+
+    };
+
+    var openMilestoneModalManually = function (url) {
+        jQuery.nmManual(url, {
+            stack: true,
+            sizes: {
+                minW: 500,
+                minH: 500
+            }
+        });
+    };
+
+    var openTicketModalManually = function (url) {
+        jQuery.nmManual(url, {
+            sizes: {
+                minW: 1800,
+                minH: 1800
+            },
+            resizable: true,
+            autoSizable: true,
+        });
+    };
+
+    // A ticket chip was changed (core/chips.js): keep the rest of the page in step.
+    document.addEventListener('lt:chip:changed', function (event) {
+        var chip = event.detail;
+        if (chip.adapter !== 'ticket') {
+            return;
+        }
+
+        // Grouped kanban: move the card to the swimlane of its new value.
+        if (shiri.kanbanGroupBy && shiri.kanbanGroupBy === chip.field) {
+            moveCardToSwimlane(chip.entityId, chip.value);
+        }
+
+        if (chip.field === 'priority') {
+            jQuery(chip.element).parents(".ticketBox")
+                .removeClass("priority-border-1 priority-border-2 priority-border-3 priority-border-4 priority-border-5")
+                .addClass("priority-border-" + chip.value);
+        }
+
+        // A done status stops a timer running on this to-do server-side (#415).
+        if (chip.field === 'status') {
+            refreshTimerIfRunningOn(chip.entityId);
+        }
+    });
+
+    // Make public what you want to have public, everything else is private
+    return {
+
+        initGanttChart:initGanttChart,
+        updateRemainingHours:updateRemainingHours,
+        updatePlannedHours:updatePlannedHours,
+        initTimeSheetChart:initTimeSheetChart,
+        initTicketTabs:initTicketTabs,
+        initTicketSearchSubmit:initTicketSearchSubmit,
+        initTicketKanban:initTicketKanban,
+        initTicketsTable:initTicketsTable,
+        initEffortDropdown:initEffortDropdown,
+        initMilestoneDropdown:initMilestoneDropdown,
+        initStatusDropdown:initStatusDropdown,
+        initToolTips:initToolTips,
+        initMilestoneDatesAsyncUpdate:initMilestoneDatesAsyncUpdate,
+        initAsyncInputChange:initAsyncInputChange,
+        initDueDateTimePickers:initDueDateTimePickers,
+        setUpKanbanColumns:setUpKanbanColumns,
+        addCommentTimesheetContent:addCommentTimesheetContent,
+        initMilestoneTable:initMilestoneTable,
+        initMilestoneDates:_initMilestoneDates,
+        initTicketsList:initTicketsList,
+        loadTicketToContainer:loadTicketToContainer,
+        initTicketSearchUrlBuilder:initTicketSearchUrlBuilder,
+        initSprintDates:initSprintDates,
+        initSimpleColorPicker:initSimpleColorPicker,
+        openMilestoneModalManually:openMilestoneModalManually,
+        openTicketModalManually:openTicketModalManually
+    };
+})();

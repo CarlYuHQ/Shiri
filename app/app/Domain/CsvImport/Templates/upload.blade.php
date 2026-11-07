@@ -1,0 +1,108 @@
+@extends($layout)
+
+@section('content')
+
+@php
+    $maxSize = \Shiri\Core\Files\FileManager::getMaximumFileUploadSize();
+@endphp
+
+<div id="fileManager">
+
+    {!! $tpl->displayNotification() !!}
+
+    <h2>{{ __('headlines.upload_csv_file') }}</h2>
+    <p>{!! sprintf(__('text.csv_upload_intro'), 'https://support.shiri.local/importing-data-via-csv') !!}</p>
+    <br /><br/>
+    <div class="uploadWrapper" style="width:100%">
+
+        <form id="upload-form">
+
+        <div class="extra" style="margin-top:5px;"></div>
+        <div class="fileUploadDrop">
+            <p><i>{!! __('text.drop_files') !!}</i></p>
+            <div class="file-upload-input" style="margin:auto;  display:inline-block"></div>
+        </div>
+
+        <!-- Progress bar #1 -->
+        <div class="input-progress"></div>
+
+        <div class="input-error"></div>
+
+        </form>
+
+    </div>
+
+</div>
+
+@once
+<script>
+
+    if (typeof uppy === 'undefined') {
+
+
+        const uppy = new Uppy.Uppy({
+            debug: false,
+            autoProceed: true,
+            restrictions: {
+                maxFileSize: {{ $maxSize }}
+            }
+        });
+
+        uppy.use(Uppy.DropTarget, { target: '#fileManager' });
+
+        uppy.use(Uppy.FileInput, {
+            target: '.file-upload-input',
+            pretty: true,
+            locale: {
+                strings: {
+                    chooseFiles: ' Browse',
+                }
+            }
+        });
+
+        uppy.use(Uppy.XHRUpload, {
+            endpoint: '{{ BASE_URL }}/csvImport/upload',
+            formData: true,
+            fieldName: 'file'
+        });
+
+        uppy.use(Uppy.StatusBar, {
+            target: '.input-progress',
+            hideUploadButton: false,
+            hideAfterFinish: false,
+        });
+
+        uppy.use(Uppy.Form, { target: '#upload-form' });
+
+        // Upload
+        uppy.on("restriction-failed", (file, error) => {
+
+            jQuery(".input-error").html("<span class='label-important'>"+error+"</span>");
+            return false
+        });
+
+        uppy.on('upload-success', (file, response) => {
+
+            jQuery(".input-error").text('');
+
+            window.location.href = "{{ BASE_URL }}/connector/integration?provider=csv_importer&step=entity&integrationId="+response.body.id;
+
+        });
+
+
+        uppy.on('upload-error', (file, error, response) => {
+
+            jQuery(".input-error").html("<span class='label-important'>There is a problem with your CSV file: "+response.body.error+"</span>");
+
+
+
+            return false
+        });
+
+
+    }
+
+</script>
+@endonce
+
+@endsection

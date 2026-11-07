@@ -1,0 +1,338 @@
+<?php
+
+namespace Shiri\Domain\Plugins\Services;
+
+use Illuminate\Support\Facades\Cache;
+use Shiri\Core\Configuration\Environment;
+use Shiri\Core\Events\EventDispatcher;
+use Shiri\Core\Language;
+use Shiri\Core\Modules\Module;
+use Shiri\Core\Modules\ModuleRegistry;
+
+class Registration
+{
+    // Plugin Id: folder name of the plugin
+    private string $pluginId;
+
+    private bool $distFolderRegistered = false;
+
+    public function __construct(string $pluginId)
+    {
+        $this->pluginId = $pluginId;
+
+        $this->registerManifestFolder();
+    }
+
+    public function registerMiddleware(array $middleware)
+    {
+
+        EventDispatcher::add_filter_listener('shiri.core.middleware.loadplugins.handle.pluginsEvents',
+            function (array $existing) use ($middleware) {
+                return array_merge($existing, $middleware);
+            }
+        );
+
+        EventDispatcher::add_filter_listener('shiri.core.http.httpkernel.*.plugins_middleware',
+            function (array $existing) use ($middleware) {
+                return array_merge($existing, $middleware);
+            }
+        );
+
+    }
+
+    public function registerLanguageFiles(array $languages = [])
+    {
+        $pluginId = $this->pluginId;
+
+        if (empty($languages)) {
+            $languages = $this->findLanguageFiles();
+        }
+
+        EventDispatcher::add_event_listener('shiri.core.middleware.loadplugins.handle.pluginsEvents', function () use ($languages) {
+
+            $language = app()->make(Language::class);
+            $config = app()->make(Environment::class);
+            $currentUserLanguage = session('usersettings.language');
+
+            // At this point in the stack localization has already determined user language and set up the core language
+            // array in the language of the users choice. First we register english if it is in the array and then we
+            // override with the user language
+            if (in_array('en-US', $languages)) {
+                $pluginLangArray = $this->loadPluginLanguage('en-US');
+                $language->mergeLanguageArray($pluginLangArray);
+            }
+
+            // Now check the user language and override if needed
+            if (in_array($currentUserLanguage, $languages)) {
+                $pluginLangArray = $this->loadPluginLanguage($currentUserLanguage);
+                $language->mergeLanguageArray($pluginLangArray);
+            }
+
+        }, 5);
+
+    }
+
+    private function findLanguageFiles(): array
+    {
+        $pluginPath = APP_ROOT.'/app/Plugins/';
+        $languageDir = '/Language/';
+
+        // Check both possible locations for language files
+        $pharFile = "{$pluginPath}{$this->pluginId}/{$this->pluginId}.phar";
+        $pharPath = 'phar://'.$pharFile.$languageDir;
+        $regularPath = "{$pluginPath}{$this->pluginId}".$languageDir;
+
+        $languageFiles = [];
+
+        // Check regular directory first
+        if (is_dir($regularPath)) {
+            $files = scandir($regularPath);
+            foreach ($files as $file) {
+                if (substr($file, -4) === '.ini') {
+                    $languageFiles[] = substr($file, 0, -4);
+                }
+            }
+        }
+
+        // Check phar if no files found in regular directory (only when the on-disk archive exists)
+        if (empty($languageFiles) && is_file($pharFile) && is_dir($pharPath)) {
+            $files = scandir($pharPath);
+            foreach ($files as $file) {
+                if (substr($file, -4) === '.ini') {
+                    $languageFiles[] = substr($file, 0, -4);
+                }
+            }
+        }
+
+        return ! empty($languageFiles) ? $languageFiles : [];
+
+    }
+
+    private function loadPluginLanguage($language): array|false
+    {
+
+        if (Cache::store('installation')->has($this->pluginId.'.language.'.$language)) {
+            return Cache::store('installation')->get($this->pluginId.'.language.'.$language);
+        }
+
+        $pluginPath = APP_ROOT.'/app/Plugins/';
+
+        $pharFile = "{$pluginPath}{$this->pluginId}/{$this->pluginId}.phar";
+        $pharPath = 'phar://'.$pharFile;
+        $regularPath = "{$pluginPath}{$this->pluginId}";
+
+        $languagePath = "/Language/{$language}.ini";
+
+        // Check phar first, only after the on-disk archive exists as a real file (open_basedir hosts)
+        if (is_file($pharFile) && file_exists($pharPath.$languagePath)) {
+            $completeLanguagePath = $pharPath.$languagePath;
+        } elseif (file_exists($regularPath.$languagePath)) {
+            $completeLanguagePath = $regularPath.$languagePath;
+        } else {
+            // Language file doesn't exist
+            Cache::store('installation')->set($this->pluginId.'.language.'.$language, false, new \DateInterval('P7D'));
+
+            return false;
+        }
+
+        $languageArray = parse_ini_file($completeLanguagePath, true);
+
+        // We're caching the results no matter what, language file is not going to magically appear.
+        // So even a false is valid as parse_ini_is too expensive to run every time
+        Cache::store('installation')->set($this->pluginId.'.language.'.$language, $languageArray, new \DateInterval('P7D'));
+
+        return $languageArray;
+
+    }
+
+    private function getPluginBasePath()
+    {
+
+        $pluginPath = APP_ROOT.'/app/Plugins/';
+
+        $pharFile = "{$pluginPath}{$this->pluginId}/{$this->pluginId}.phar";
+        $pharPath = 'phar://'.$pharFile;
+        $regularPath = "{$pluginPath}{$this->pluginId}";
+
+        // Stat the on-disk archive first: stat'ing a phar:// path for a missing archive
+        // raises a spurious open_basedir error on hosts with open_basedir set.
+        if (is_file($pharFile) && file_exists($pharPath)) {
+            return $pharPath;
+        }
+
+        if (file_exists($regularPath)) {
+            return $regularPath;
+        }
+
+        return '/';
+
+    }
+
+    /**
+     * Register the plugin as a module that projects can switch on or off
+     * (Project settings → Modules). A switched-off module disappears from the project menu and its
+     * pages are blocked in that project.
+     *
+     * Menu items added with {@see addMenuItem()} carry the plugin id as their module, so with the
+     * defaults the plugin's menu items and its /{pluginid}/* pages follow the switch.
+     *
+     * Every key is optional: `id`, `title` and `routes` default to the plugin id; `title` and
+     * `description` may be language keys. See {@see Module} for what each key does.
+     *
+     * @param  array{id?: string, title?: string, description?: string, icon?: string, enabledByDefault?: bool, routes?: array<int, string>, permissionDomain?: string|null}  $module
+     */
+    public function registerModule(array $module = []): void
+    {
+        $moduleId = $module['id'] ?? $this->pluginId;
+
+        app()->make(ModuleRegistry::class)->register(new Module(
+            id: $moduleId,
+            title: $module['title'] ?? $this->pluginId,
+            description: $module['description'] ?? '',
+            icon: $module['icon'] ?? 'fa fa-puzzle-piece',
+            enabledByDefault: $module['enabledByDefault'] ?? true,
+            routes: $module['routes'] ?? [$this->pluginId],
+            permissionDomain: $module['permissionDomain'] ?? null,
+            source: $this->pluginId,
+        ));
+    }
+
+    public function addMenuItem(array $item, string $section, array $location)
+    {
+
+        $pluginId = $this->pluginId;
+
+        EventDispatcher::add_filter_listener('shiri.domain.menu.repositories.menu.getMenuStructure.menuStructures.'.$section,
+            function ($menu) use ($item, $location, $pluginId) {
+
+                // Prepare
+                $item['title'] = "<span class='".$item['icon']."'></span> ".__($item['title']);
+                $item['tooltip'] = __($item['tooltip']);
+                $item['type'] = 'item';
+                $item['module'] = $pluginId;
+
+                $primaryLocationKey = $location[0] ?? $menu[count($menu)];
+
+                if (count($location) <= 1) {
+                    $menu[$primaryLocationKey] = $item;
+                }
+
+                if (count($location) == 2) {
+                    $submenuLocationKey = $location[1] ?? $menu[$primaryLocationKey]['submenu'][count(
+                        $menu[$primaryLocationKey]['submenu']
+                    )];
+
+                    $menu[$primaryLocationKey]['submenu'][$submenuLocationKey] = $item;
+
+                }
+
+                return $menu;
+            },
+            50
+        );
+
+        EventDispatcher::add_filter_listener('shiri.domain.menu.repositories.menu.getSectionMenuType.menuSections',
+            function ($routes) use ($section, $item) {
+
+                $route = str_replace('/', '.', $item['href']);
+
+                $array = explode('.', $route);
+                if ($route[0] == '.') {
+                    array_shift($array);
+                }
+                $route = implode('.', $array);
+
+                return array_merge($routes, [$route => $section]);
+            },
+        );
+
+    }
+
+    public function addHeaderJs(array $jsFiles)
+    {
+
+        EventDispatcher::add_event_listener('shiri.*.afterLinkTags', function () use ($jsFiles) {
+
+            $mix = app()->make(\Shiri\Core\Support\Mix::class);
+            $basePath = $this->getPluginBasePath();
+
+            // Add jQuery UI for draggable and resizable functionality
+            $files = $mix->getManifest()[$basePath.'/dist'];
+
+            foreach ($jsFiles as $jsFile) {
+                if (isset($files[$jsFile])) {
+                    echo '<script src="'.BASE_URL.$files[$jsFile].'"></script>';
+                }
+            }
+
+        });
+
+    }
+
+    protected function registerManifestFolder()
+    {
+
+        if ($this->distFolderRegistered === false) {
+
+            $distPath = '';
+            $basePath = $this->getPluginBasePath();
+            if (file_exists($basePath.'/dist')) {
+                $distPath = $basePath.'/dist';
+            }
+
+            if ($distPath !== '') {
+                EventDispatcher::add_filter_listener(
+                    'shiri.core.support.mix.__construct.mix_manifest_directories',
+                    function (array $directories) use ($distPath) {
+                        return array_merge($directories, [$distPath]);
+                    }
+                );
+
+                $this->distFolderRegistered = true;
+            }
+
+        }
+    }
+
+    public function addFooterJs(array $paths)
+    {
+
+        EventDispatcher::add_event_listener('shiri.*.beforeBodyClose', function () use ($paths) {
+
+            $mix = app()->make(\Shiri\Core\Support\Mix::class);
+            $basePath = $this->getPluginBasePath();
+
+            // Add jQuery UI for draggable and resizable functionality
+            $files = $mix->getManifest()[$basePath.'/dist'];
+
+            foreach ($paths as $jsFile) {
+                if (isset($files[$jsFile])) {
+                    echo '<script src="'.BASE_URL.$files[$jsFile].'"></script>';
+                }
+            }
+
+        });
+
+    }
+
+    public function addCss(array $paths)
+    {
+
+        EventDispatcher::add_event_listener('shiri.*.afterLinkTags', function () use ($paths) {
+
+            $mix = app()->make(\Shiri\Core\Support\Mix::class);
+            $basePath = $this->getPluginBasePath();
+
+            // Add jQuery UI for draggable and resizable functionality
+            $files = $mix->getManifest()[$basePath.'/dist'];
+
+            foreach ($paths as $cssFile) {
+                if (isset($files[$cssFile])) {
+                    echo '<link rel="stylesheet" href="'.BASE_URL.$files[$cssFile].'" />';
+                }
+            }
+
+        });
+
+    }
+}

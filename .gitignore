@@ -1,0 +1,27 @@
+# 与本项目无关的大件（本机实验残留）
+/openproject/
+/.workbuddy/
+
+# 运行时产物 / 依赖 / 凭据
+app/vendor/
+app/storage/
+app/userfiles/
+app/bootstrap/cache/
+app/config/.env
+app/config/.env.bak.*
+
+# public：只留本项目写过的那几个文件（其余是 75MB 上游产物）
+# dist/ 内部由 app/public/dist/.gitignore 单独放行，避免两份白名单互相打架
+app/public/*
+!app/public/dist/
+
+# 本地运行物
+runtime/logs/
+runtime/tmp/
+runtime/run/
+runtime/brew-*.log
+runtime/desktop/build/
+
+# 杂项
+*.bak.*
+.DS_Store

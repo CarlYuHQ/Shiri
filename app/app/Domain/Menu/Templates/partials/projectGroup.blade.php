@@ -1,0 +1,46 @@
+@php
+    $groupState = app(\Shiri\Core\UI\UiState::class)->get($prefix.'-projectSelectorlist-group-'.$parent, 'closed');
+@endphp
+<ul id="{{ $prefix }}-projectSelectorlist-group-{{ $parent }}" class="level-{{ $level }} projectGroup {{ $groupState }}">
+    @foreach($projects as $project)
+
+        @if(
+            !session()->exists("usersettings.projectSelectFilter.client")
+            || session("usersettings.projectSelectFilter.client") == $project["clientId"]
+            || session("usersettings.projectSelectFilter.client") == 0
+            || session("usersettings.projectSelectFilter.client") == ""
+            || $project["clientId"] == ''
+            )
+
+            <li class="projectLineItem hasSubtitle {{ session("currentProject") == $project['id'] ? "active" : '' }}" >
+                @php
+                    $parentState = app(\Shiri\Core\UI\UiState::class)->get($prefix.'-projectSelectorlist-group-'.$project['id'], 'closed');
+                @endphp
+
+                @if((empty($project['children']) || count($project['children']) ==0))
+                    <span class="toggler"></span>
+                @endif
+
+                @if(!empty($project['children']) && count($project['children']) >0)
+                    <a href="javascript:void(0);" class="toggler {{ $parentState }}" id="{{ $prefix }}-toggler-{{ $project["id"] }}" onclick="shiri.menuController.toggleProjectDropDownList('{{ $project["id"] }}', '', '{{ $prefix }}')">
+                        @if($parentState == 'closed')
+                            <i class="fa fa-angle-right"></i>
+                        @else
+                            <i class="fa fa-angle-down"></i>
+                        @endif
+                    </a>
+                @endif
+                @include('menu::partials.projectLink')
+
+                <div class="clear"></div>
+
+                {{-- Depth cap: the hierarchy is cycle-guarded server-side, but a runaway
+                     tree (e.g. mutated by a plugin filter) must never recurse unbounded --}}
+                @if(!empty($project['children']) && count($project['children']) >0 && $level < 20)
+                    @include('menu::partials.projectGroup', ['projects' => $project['children'], 'parent' => $project['id'], 'level'=> $level+1, 'prefix' => $prefix, "currentProject"=>$currentProject])
+                @endif
+            </li>
+
+        @endif
+    @endforeach
+</ul>

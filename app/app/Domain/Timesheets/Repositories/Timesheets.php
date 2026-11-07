@@ -1,0 +1,1070 @@
+<?php
+
+namespace Shiri\Domain\Timesheets\Repositories;
+
+use Carbon\Carbon;
+use Carbon\CarbonInterface;
+use Carbon\CarbonPeriod;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Database\ConnectionInterface;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Log;
+use Shiri\Core\Db\DatabaseHelper;
+use Shiri\Core\Db\Db as DbCore;
+use Shiri\Core\Db\Repository;
+use PDO;
+
+class Timesheets extends Repository
+{
+    private ConnectionInterface $db;
+
+    private DatabaseHelper $dbHelper;
+
+    public array $kind = [
+        'GENERAL_BILLABLE' => 'label.general_billable',
+        'GENERAL_NOT_BILLABLE' => 'label.general_not_billable',
+        'PROJECTMANAGEMENT' => 'label.projectmanagement',
+        'DEVELOPMENT' => 'label.development',
+        'BUGFIXING_NOT_BILLABLE' => 'label.bugfixing_not_billable',
+        'TESTING' => 'label.testing',
+    ];
+
+    /**
+     * Get database connection
+     */
+    public function __construct(DbCore $db, DatabaseHelper $dbHelper)
+    {
+        $this->db = $db->getConnection();
+        $this->dbHelper = $dbHelper;
+    }
+
+    /**
+     * Retrieves all timesheets based on the provided filters.
+     *
+     * @return array|false An array of timesheets or false if there was an error
+     */
+    public function getAll(?int $id, ?string $kind, ?CarbonInterface $dateFrom, ?CarbonInterface $dateTo, ?int $userId, ?string $invEmpl, ?string $invComp, ?string $paid, ?int $clientId, ?int $ticketFilter): array|false
+    {
+        $query = $this->db->table('zp_timesheets')
+            ->select(
+                'zp_timesheets.id',
+                'zp_timesheets.userId',
+                'zp_timesheets.ticketId',
+                'zp_timesheets.workDate',
+                'zp_timesheets.hours',
+                'zp_timesheets.description',
+                'zp_timesheets.kind',
+                'zp_projects.name',
+                'zp_projects.id AS projectId',
+                'zp_clients.name AS clientName',
+                'zp_clients.id AS clientId',
+                'zp_timesheets.invoicedEmpl',
+                'zp_timesheets.invoicedComp',
+                'zp_timesheets.invoicedEmplDate',
+                'zp_timesheets.invoicedCompDate',
+                'zp_timesheets.paid',
+                'zp_timesheets.paidDate',
+                'zp_user.firstname',
+                'zp_user.lastname',
+                'zp_tickets.id as ticketId',
+                'zp_tickets.headline',
+                'zp_tickets.planHours',
+                'zp_tickets.tags',
+                'zp_tickets.modified',
+                'milestone.headline as milestone'
+            )
+            ->leftJoin('zp_user', 'zp_timesheets.userId', '=', 'zp_user.id')
+            ->leftJoin('zp_tickets', 'zp_timesheets.ticketId', '=', 'zp_tickets.id')
+            ->leftJoin('zp_projects', 'zp_tickets.projectId', '=', 'zp_projects.id')
+            ->leftJoin('zp_clients', 'zp_projects.clientId', '=', 'zp_clients.id')
+            ->leftJoin('zp_tickets as milestone', 'zp_tickets.milestoneid', '=', 'milestone.id')
+            ->whereBetween('zp_timesheets.workDate', [$dateFrom, $dateTo]);
+
+        if ($id > 0) {
+            $query->where('zp_tickets.projectId', $id);
+        }
+
+        if ($clientId > 0) {
+            $query->where('zp_projects.clientId', $clientId);
+        }
+
+        if ($ticketFilter > 0) {
+            $query->where('zp_tickets.id', $ticketFilter);
+        }
+
+        if ($kind != 'all') {
+            $query->where('zp_timesheets.kind', $kind);
+        }
+
+        if ($userId != null) {
+            $query->where('zp_timesheets.userId', $userId);
+        }
+
+        if ($invComp == '1') {
+            $query->where('zp_timesheets.invoicedComp', 1);
+        }
+
+        if ($invEmpl == '1') {
+            $query->where('zp_timesheets.invoicedEmpl', 1);
+        } elseif ($invEmpl == '0') {
+            $query->where('zp_timesheets.invoicedEmpl', 0);
+        }
+
+        if ($paid == '1') {
+            $query->where('zp_timesheets.paid', 1);
+        }
+
+        $query->groupBy(
+            'zp_timesheets.id',
+            'zp_timesheets.userId',
+            'zp_timesheets.ticketId',
+            'zp_timesheets.workDate',
+            'zp_timesheets.hours',
+            'zp_timesheets.description',
+            'zp_timesheets.kind',
+            'zp_projects.name',
+            'zp_projects.id',
+            'zp_clients.name',
+            'zp_clients.id',
+            'zp_timesheets.invoicedEmpl',
+            'zp_timesheets.invoicedComp',
+            'zp_timesheets.invoicedEmplDate',
+            'zp_timesheets.invoicedCompDate',
+            'zp_timesheets.paid',
+            'zp_timesheets.paidDate',
+            'zp_user.firstname',
+            'zp_user.lastname',
+            'zp_tickets.id',
+            'zp_tickets.headline',
+            'zp_tickets.planHours',
+            'zp_tickets.tags',
+            'zp_tickets.modified',
+            'milestone.headline'
+        );
+
+        $results = $query->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    /**
+     * @TODO: Function is currently not used by core.
+     */
+    public function getUsersHours(int $id): mixed
+    {
+        $results = $this->db->table('zp_timesheets')
+            ->select('id', 'hours', 'description')
+            ->where('userId', $id)
+            ->orderBy('id', 'desc')
+            ->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    public function getAllAccountTimesheets(?int $projectId): array|false
+    {
+        $query = $this->db->table('zp_timesheets')
+            ->select(
+                'zp_timesheets.id',
+                'zp_timesheets.userId',
+                'zp_timesheets.ticketId',
+                'zp_timesheets.workDate',
+                'zp_timesheets.hours',
+                'zp_timesheets.description',
+                'zp_timesheets.kind',
+                'zp_projects.name',
+                'zp_projects.id AS projectId',
+                'zp_clients.name AS clientName',
+                'zp_clients.id AS clientId',
+                'zp_timesheets.invoicedEmpl',
+                'zp_timesheets.invoicedComp',
+                'zp_timesheets.invoicedEmplDate',
+                'zp_timesheets.invoicedCompDate',
+                'zp_timesheets.paid',
+                'zp_timesheets.paidDate',
+                'zp_timesheets.modified',
+                'zp_user.firstname',
+                'zp_user.lastname',
+                'zp_tickets.id as ticketId',
+                'zp_tickets.headline',
+                'zp_tickets.planHours',
+                'zp_tickets.tags',
+                'milestone.headline as milestone'
+            )
+            ->leftJoin('zp_user', 'zp_timesheets.userId', '=', 'zp_user.id')
+            ->leftJoin('zp_tickets', 'zp_timesheets.ticketId', '=', 'zp_tickets.id')
+            ->leftJoin('zp_projects', 'zp_tickets.projectId', '=', 'zp_projects.id')
+            ->leftJoin('zp_clients', 'zp_projects.clientId', '=', 'zp_clients.id')
+            ->leftJoin('zp_tickets as milestone', 'zp_tickets.milestoneid', '=', 'milestone.id')
+            ->where(function ($q) {
+                $userId = session('userdata.id') ?? '-1';
+                $clientId = session('userdata.clientId') ?? '-1';
+                $requesterRole = session()->exists('userdata') ? session('userdata.role') : -1;
+
+                $q->whereIn('zp_tickets.projectId', function ($subquery) use ($userId) {
+                    $subquery->select('projectId')
+                        ->from('zp_relationuserproject')
+                        ->where('userId', $userId);
+                })
+                    ->orWhere('zp_projects.psettings', 'all')
+                    ->orWhere(function ($q2) use ($clientId) {
+                        $q2->where('zp_projects.psettings', 'clients')
+                            ->where('zp_projects.clientId', $clientId);
+                    })
+                    ->orWhere(function ($q3) use ($requesterRole) {
+                        if ($requesterRole === 'admin' || $requesterRole === 'manager') {
+                            $q3->whereRaw('1=1');
+                        }
+                    })
+                    ->orWhere(function ($q4) use ($userId) {
+                        // General-work time (virtual ticketId -1 → no matching
+                        // ticket/project after the left joins) has no project to
+                        // gate on, so it fails every project-access branch above
+                        // and silently disappears from this read — e.g. mobile's
+                        // Time tab (which can only call pollForNewTimesheets over
+                        // JSON-RPC) shows 0h even on a day with real general
+                        // hours. Always let a user see their OWN no-project
+                        // entries. Non-managers are AND-scoped to their userId
+                        // just below; managers already match via 1=1, so this
+                        // only rescues the regular-user case.
+                        $q4->whereNull('zp_tickets.projectId')
+                            ->where('zp_timesheets.userId', $userId);
+                    });
+            });
+
+        // If user is not a manager, only pull their own timesheet entries
+        if (session('userdata.role') !== 'admin' && session('userdata.role') !== 'manager') {
+            $query->where('zp_timesheets.userId', session('userdata.id') ?? '-1');
+        }
+
+        if (isset($projectId) && $projectId > 0) {
+            $query->where('zp_projects.id', $projectId);
+        }
+
+        $query->groupBy(
+            'zp_timesheets.id',
+            'zp_timesheets.userId',
+            'zp_timesheets.ticketId',
+            'zp_timesheets.workDate',
+            'zp_timesheets.hours',
+            'zp_timesheets.description',
+            'zp_timesheets.kind',
+            'zp_projects.name',
+            'zp_projects.id',
+            'zp_clients.name',
+            'zp_clients.id',
+            'zp_timesheets.invoicedEmpl',
+            'zp_timesheets.invoicedComp',
+            'zp_timesheets.invoicedEmplDate',
+            'zp_timesheets.invoicedCompDate',
+            'zp_timesheets.paid',
+            'zp_timesheets.paidDate',
+            'zp_timesheets.modified',
+            'zp_user.firstname',
+            'zp_user.lastname',
+            'zp_tickets.id',
+            'zp_tickets.headline',
+            'zp_tickets.planHours',
+            'zp_tickets.tags',
+            'milestone.headline'
+        );
+
+        $results = $query->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    /**
+     * Retrieves the total number of hours booked from the timesheets table.
+     *
+     * @return mixed The total number of hours booked, or 0 if no hours are booked.
+     */
+    public function getHoursBooked(): mixed
+    {
+        $result = $this->db->table('zp_timesheets')
+            ->selectRaw('SUM(hours) AS '.$this->dbHelper->wrapColumn('hoursBooked'))
+            ->first();
+
+        return $result->hoursBooked ?? 0;
+    }
+
+    public function getWeeklyTimesheets(int $projectId, CarbonInterface $fromDate, int $userId = 0): mixed
+    {
+        if (! $fromDate->isUtc()) {
+            $fromDate = $fromDate->copy()->setTimezone('UTC');
+        }
+
+        // Entries are stored as the user's local midnight converted to UTC, so rows logged
+        // under a different UTC offset (DST) can sit up to an hour outside a flat +7d window —
+        // they'd show up in the adjacent week's grid instead (#3310). Widen the window by 12h
+        // on both sides; the service buckets by local calendar day, so over-fetched rows that
+        // don't belong to this week simply don't render.
+        $startDate = $fromDate->copy()->subHours(12);
+        $endDate = $fromDate->copy()->addDays(7)->addHours(12);
+
+        $query = $this->db->table('zp_timesheets')
+            ->select(
+                'zp_timesheets.id',
+                'zp_timesheets.userId',
+                'zp_timesheets.ticketId',
+                'zp_timesheets.workDate as workDate',
+                'zp_timesheets.hours',
+                'zp_timesheets.description',
+                'zp_timesheets.kind',
+                'zp_timesheets.invoicedEmpl',
+                'zp_timesheets.invoicedComp',
+                'zp_timesheets.invoicedEmplDate',
+                'zp_timesheets.invoicedCompDate',
+                'zp_timesheets.paid',
+                'zp_timesheets.paidDate',
+                'zp_timesheets.kind',
+                'zp_timesheets.modified',
+                'zp_tickets.headline',
+                'zp_tickets.planHours',
+                'zp_projects.name',
+                'zp_projects.id AS projectId',
+                'zp_projects.clientId AS clientId',
+                'zp_clients.name AS clientName'
+            )
+            ->leftJoin('zp_tickets', 'zp_tickets.id', '=', 'zp_timesheets.ticketId')
+            ->leftJoin('zp_projects', 'zp_tickets.projectId', '=', 'zp_projects.id')
+            ->leftJoin('zp_clients', 'zp_clients.id', '=', 'zp_projects.clientId')
+            ->where('zp_timesheets.workDate', '>=', $startDate->format('Y-m-d H:i:s'))
+            ->where('zp_timesheets.workDate', '<', $endDate->format('Y-m-d H:i:s'))
+            ->where('zp_timesheets.userId', $userId)
+            ->where('hours', '>', 0);
+
+        if ($projectId > 0) {
+            $query->where('zp_tickets.projectId', $projectId);
+        }
+
+        $query->orderBy('zp_timesheets.ticketId')
+            ->orderBy('zp_timesheets.kind')
+            ->orderBy('zp_timesheets.workDate', 'desc');
+
+        $results = $query->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    /**
+     * getUsersTicketHours - get the total hours
+     *
+     * @return int|mixed
+     */
+    public function getUsersTicketHours(int $ticketId, int $userId): mixed
+    {
+        // Use raw SQL for DATE_FORMAT as it's MySQL/PostgreSQL specific
+        $wrappedWorkDate = $this->dbHelper->wrapColumn('workDate');
+        $dateFormatSql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+            'pgsql' => "TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'YYYY-MM-DD')",
+            default => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+        };
+
+        $result = $this->db->table('zp_timesheets')
+            ->selectRaw('SUM(hours) AS '.$this->dbHelper->wrapColumn('sumHours'))
+            ->where('ticketId', $ticketId)
+            ->where('userId', $userId)
+            ->groupByRaw($dateFormatSql)
+            ->first();
+
+        return $result->sumHours ?? 0;
+    }
+
+    /**
+     * getTime - get a specific time entry
+     */
+    public function getTimesheet(int $id): mixed
+    {
+        $result = $this->db->table('zp_timesheets')
+            ->select(
+                'zp_timesheets.id',
+                'zp_timesheets.userId',
+                'zp_timesheets.ticketId',
+                'zp_timesheets.workDate',
+                'zp_timesheets.hours',
+                'zp_timesheets.description',
+                'zp_timesheets.kind',
+                'zp_projects.id AS projectId',
+                'zp_timesheets.invoicedEmpl',
+                'zp_timesheets.invoicedComp',
+                'zp_timesheets.invoicedEmplDate',
+                'zp_timesheets.invoicedCompDate',
+                'zp_timesheets.paid',
+                'zp_timesheets.paidDate',
+                'zp_timesheets.modified'
+            )
+            ->leftJoin('zp_tickets', 'zp_timesheets.ticketId', '=', 'zp_tickets.id')
+            ->leftJoin('zp_projects', 'zp_tickets.projectId', '=', 'zp_projects.id')
+            ->where('zp_timesheets.id', $id)
+            ->first();
+
+        return $result ? (array) $result : false;
+    }
+
+    /**
+     * getProjectHours - get the Project hours for a specific project
+     *
+     * @TODO: Function is currently not used by core.
+     *
+     * @return mixed
+     */
+    public function getProjectHours(int $projectId)
+    {
+        // Note: WITH ROLLUP is MySQL-specific and not supported in PostgreSQL
+        // This would need a different approach for PostgreSQL if this method is used
+        $wrappedWorkDate = $this->dbHelper->wrapColumn('workDate');
+        $monthSql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "MONTH(zp_timesheets.{$wrappedWorkDate})",
+            'pgsql' => "EXTRACT(MONTH FROM zp_timesheets.{$wrappedWorkDate})::integer",
+            default => "MONTH(zp_timesheets.{$wrappedWorkDate})",
+        };
+
+        $results = $this->db->table('zp_timesheets')
+            ->selectRaw("{$monthSql} AS month")
+            ->selectRaw('SUM(zp_timesheets.hours) AS summe')
+            ->leftJoin('zp_tickets', 'zp_timesheets.ticketId', '=', 'zp_tickets.id')
+            ->where('zp_tickets.projectId', $projectId)
+            ->groupByRaw($monthSql)
+            ->limit(12)
+            ->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    /**
+     * getLoggedHoursForTicket - get the Ticket hours for a specific ticket
+     *
+     * @throws BindingResolutionException
+     */
+    public function getLoggedHoursForTicket(int $ticketId): array
+    {
+        $wrappedWorkDate = $this->dbHelper->wrapColumn('workDate');
+        $wrappedMonthName = $this->dbHelper->wrapColumn('monthName');
+        $dateFormatYearSql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "YEAR(zp_timesheets.{$wrappedWorkDate}) AS year,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d') AS utc,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%M') AS {$wrappedMonthName},
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%m') AS month",
+            'pgsql' => "EXTRACT(YEAR FROM zp_timesheets.{$wrappedWorkDate})::integer AS year,
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'YYYY-MM-DD') AS utc,
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'Month') AS {$wrappedMonthName},
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'MM') AS month",
+            default => "YEAR(zp_timesheets.{$wrappedWorkDate}) AS year,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d') AS utc,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%M') AS {$wrappedMonthName},
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%m') AS month",
+        };
+
+        $groupBySql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+            'pgsql' => "EXTRACT(YEAR FROM zp_timesheets.{$wrappedWorkDate}),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'YYYY-MM-DD'),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'Month'),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'MM'),
+                        zp_timesheets.{$wrappedWorkDate}",
+            default => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+        };
+
+        $results = $this->db->table('zp_timesheets')
+            ->selectRaw($dateFormatYearSql)
+            ->addSelect('zp_timesheets.workDate AS workdate')
+            ->selectRaw('SUM(ROUND(CAST(zp_timesheets.hours AS DECIMAL(10,2)), 2)) AS summe')
+            ->where('zp_timesheets.ticketId', $ticketId)
+            ->whereNotNull('zp_timesheets.workDate')
+            ->groupByRaw($groupBySql)
+            ->orderBy('utc')
+            ->get();
+
+        $values = array_map(fn ($item) => (array) $item, $results->toArray());
+        $returnValues = [];
+
+        if (count($values) > 0) {
+            try {
+                $startDate = dtHelper()->parseDbDateTime($values[0]['workdate'])->startOfMonth();
+                $endDate = dtHelper()->parseDbDateTime(last($values)['workdate'])->lastOfMonth();
+
+                $range = CarbonPeriod::since($startDate)->days(1)->until($endDate);
+                foreach ($range as $key => $date) {
+                    $utc = $date->format('Y-m-d');
+                    $returnValues[$utc] = [
+                        'utc' => $utc,
+                        'summe' => 0,
+                    ];
+                }
+
+                foreach ($values as $row) {
+                    $returnValues[$row['utc']]['summe'] = $row['summe'];
+                }
+            } catch (\Exception $e) {
+                // Some broken date formats in the db. Log error and return empty results.
+                report($e);
+
+                $utc = dtHelper()->dbNow()->format('Y-m-d H:i:s');
+                $returnValues[$utc] = [
+                    'utc' => $utc,
+                    'summe' => 0,
+                ];
+            }
+        } else {
+            $utc = dtHelper()->dbNow()->format('Y-m-d H:i:s');
+            $returnValues[$utc] = [
+                'utc' => $utc,
+                'summe' => 0,
+            ];
+        }
+
+        return $returnValues;
+    }
+
+    public function getTimesheetsByTicket($id)
+    {
+        $wrappedWorkDate = $this->dbHelper->wrapColumn('workDate');
+        $wrappedMonthName = $this->dbHelper->wrapColumn('monthName');
+        $dateFormatSql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "YEAR(zp_timesheets.{$wrappedWorkDate}) AS year,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d') AS utc,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%M') AS {$wrappedMonthName},
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%m') AS month",
+            'pgsql' => "EXTRACT(YEAR FROM zp_timesheets.{$wrappedWorkDate})::integer AS year,
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'YYYY-MM-DD') AS utc,
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'Month') AS {$wrappedMonthName},
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'MM') AS month",
+            default => "YEAR(zp_timesheets.{$wrappedWorkDate}) AS year,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d') AS utc,
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%M') AS {$wrappedMonthName},
+                        DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%m') AS month",
+        };
+
+        $groupBySql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+            'pgsql' => "EXTRACT(YEAR FROM zp_timesheets.{$wrappedWorkDate}),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'YYYY-MM-DD'),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'Month'),
+                        TO_CHAR(zp_timesheets.{$wrappedWorkDate}, 'MM'),
+                        zp_timesheets.{$wrappedWorkDate}",
+            default => "DATE_FORMAT(zp_timesheets.{$wrappedWorkDate}, '%Y-%m-%d')",
+        };
+
+        $results = $this->db->table('zp_timesheets')
+            ->selectRaw($dateFormatSql)
+            ->addSelect('zp_timesheets.workDate AS workdate')
+            ->selectRaw('SUM(ROUND(CAST(zp_timesheets.hours AS DECIMAL(10,2)), 2)) AS sum')
+            ->where('zp_timesheets.ticketId', $id)
+            ->whereNotNull('zp_timesheets.workDate')
+            ->groupByRaw($groupBySql)
+            ->orderBy('utc')
+            ->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    /**
+     * isClocked - Checks to see whether a user is clocked in
+     *
+     * @param  int  $id  $id
+     */
+    public function isClocked(int $id): false|array
+    {
+        if (! session()->exists('userdata')) {
+            return false;
+        }
+
+        $result = $this->db->table('zp_punch_clock')
+            ->select(
+                'zp_punch_clock.id',
+                'zp_punch_clock.userId',
+                'zp_punch_clock.minutes',
+                'zp_punch_clock.hours',
+                'zp_punch_clock.punchIn',
+                'zp_tickets.headline',
+                'zp_tickets.id as ticketId'
+            )
+            ->leftJoin('zp_tickets', 'zp_punch_clock.id', '=', 'zp_tickets.id')
+            ->where('zp_punch_clock.userId', session('userdata.id'))
+            ->limit(1)
+            ->first();
+
+        if (! $result) {
+            return false;
+        }
+
+        $onTheClock = [];
+        $onTheClock['id'] = $result->id;
+        $onTheClock['since'] = $result->punchIn;
+        $onTheClock['headline'] = $result->headline;
+        // punchIn is an integer column and punchIn() writes time(), so the stored value is a
+        // Unix timestamp. PDO hands integer columns back as STRINGS, and Carbon's constructor
+        // parses an int epoch but throws InvalidFormatException on the string form
+        // ("Failed to parse time string (1786766470) at position 8") — 500ing every page that
+        // renders the timer (#3632). punchOut() already reads it as an epoch, so the epoch is
+        // the intended storage and only this read was wrong. A legacy datetime string is still
+        // accepted so no install trades one crash for another.
+        $start_date = is_numeric($result->punchIn)
+            ? Carbon::createFromTimestamp((int) $result->punchIn, 'UTC')
+            : new Carbon($result->punchIn, 'UTC');
+        $since_start = $start_date->diff(Carbon::now(session('usersettings.timezone'))->setTimezone('UTC'));
+
+        $r = $since_start->format('%H:%I');
+
+        $onTheClock['totalTime'] = $r;
+
+        return $onTheClock;
+    }
+
+    /**
+     * addTime - add user-specific time entry. Hours are added onto the day's existing entry for
+     * the same user/ticket/kind when there is one.
+     *
+     * @param  array  $values  The entry values (userId, ticket, date, kind, hours, ...).
+     * @return bool True when a NEW entry row was inserted, false when hours were added to an existing row.
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     */
+    public function addTime(array $values): bool
+    {
+        $now = date('Y-m-d H:i:s');
+
+        // Portable upsert on the (userId, ticketId, workDate, kind) unique key: accumulate hours
+        // and prepend the new description onto the existing entry. Replaces MySQL-only
+        // ON DUPLICATE KEY UPDATE so this also runs on PostgreSQL.
+        if ($this->findTimesheetRow((int) $values['userId'], (int) $values['ticket'], $values['date'], $values['kind'])) {
+            $this->accumulateAddTimeRow($values, $now);
+            $this->cleanUpEmptyTimesheets();
+
+            return false;
+        }
+
+        try {
+            $this->db->table('zp_timesheets')->insert([
+                'userId' => $values['userId'],
+                'ticketId' => $values['ticket'],
+                'workDate' => $values['date'],
+                'hours' => $values['hours'],
+                'kind' => $values['kind'],
+                'description' => $values['description'] ?? '',
+                'invoicedEmpl' => $values['invoicedEmpl'] ?? '',
+                'invoicedComp' => $values['invoicedComp'] ?? '',
+                'invoicedEmplDate' => $values['invoicedEmplDate'] ?? '',
+                'invoicedCompDate' => $values['invoicedCompDate'] ?? '',
+                'rate' => $values['rate'] ?? '',
+                'paid' => $values['paid'] ?? '',
+                'paidDate' => $values['paidDate'] ?? '',
+                'modified' => $now,
+            ]);
+        } catch (QueryException $e) {
+            // A concurrent request created the entry between our check and insert; the unique key
+            // rejects this insert, so accumulate onto the row that now exists instead of 500ing.
+            if (! $this->isUniqueConstraintViolation($e)) {
+                throw $e;
+            }
+
+            $this->accumulateAddTimeRow($values, $now);
+            $this->cleanUpEmptyTimesheets();
+
+            return false;
+        }
+
+        $this->cleanUpEmptyTimesheets();
+
+        return true;
+    }
+
+    /**
+     * punchIn - clock in on a specified ticket
+     */
+    public function punchIn(int $ticketId): bool
+    {
+        $userId = session('userdata.id');
+
+        if (empty($userId)) {
+            Log::warning('punchIn: No userId in session');
+
+            return false;
+        }
+
+        try {
+            return $this->db->table('zp_punch_clock')->insert([
+                'id' => $ticketId,
+                'userId' => $userId,
+                'punchIn' => time(),
+            ]);
+        } catch (QueryException $e) {
+            Log::error('punchIn failed: '.$e->getMessage());
+
+            return false;
+        }
+    }
+
+    /**
+     * Remove the session user's running timer on a ticket without booking any time.
+     *
+     * @param  int  $ticketId  The ticket the timer runs on.
+     * @return bool True when a timer row was removed.
+     */
+    public function discardPunch(int $ticketId): bool
+    {
+        return $this->db->table('zp_punch_clock')
+            ->where('userId', session('userdata.id'))
+            ->where('id', $ticketId)
+            ->delete() > 0;
+    }
+
+    /**
+     * punchOut - clock out on whatever ticket is open for the user
+     *
+     * @throws BindingResolutionException
+     */
+    public function punchOut(int $ticketId): float|false|int
+    {
+        $result = $this->db->table('zp_punch_clock')
+            ->select('*')
+            ->where('userId', session('userdata.id'))
+            ->where('id', $ticketId)
+            ->limit(1)
+            ->first();
+
+        if (! $result) {
+            return false;
+        }
+
+        $inTimestamp = $result->punchIn;
+        $outTimestamp = time();
+
+        $seconds = ($outTimestamp - $inTimestamp);
+        $totalMinutesWorked = $seconds / 60;
+        $hoursWorked = round(($totalMinutesWorked / 60), 2);
+
+        // Delete punch clock and insert timesheet in a transaction
+        // to prevent data loss if the timesheet insert fails
+        return $this->db->transaction(function () use ($ticketId, $inTimestamp, $hoursWorked) {
+
+            $this->db->table('zp_punch_clock')
+                ->where('userId', session('userdata.id'))
+                ->where('id', $ticketId)
+                ->delete();
+
+            // At least 1 minute
+            if ($hoursWorked < 0.016) {
+                return 0;
+            }
+
+            /** @var \Carbon\CarbonImmutable $userStartOfDay */
+            $userStartOfDay = dtHelper()::createFromTimestamp($inTimestamp, 'UTC')->setToUserTimezone()->startOfDay();
+
+            // Accumulate onto the day's existing entry for this ticket/kind. Done as a portable
+            // read-then-write instead of MySQL-only ON DUPLICATE KEY UPDATE so it also runs on
+            // PostgreSQL. The (userId, ticketId, workDate, kind) unique key + surrounding
+            // transaction keep this atomic.
+            $this->accumulateHours(
+                (int) session('userdata.id'),
+                $ticketId,
+                $userStartOfDay->formatDateTimeForDb(),
+                'GENERAL_BILLABLE',
+                $hoursWorked,
+            );
+
+            return $hoursWorked;
+        });
+    }
+
+    /**
+     * upsertTimesheetEntry - set the hours of the user's entry for a ticket/day/kind, creating the
+     * entry when it does not exist yet.
+     *
+     * @param  array  $values  The entry values (userId, ticket, date, kind, hours, ...).
+     * @return bool True when the entry did not exist before (a new row), false when an existing row was overwritten.
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     */
+    public function upsertTimesheetEntry(array $values): bool
+    {
+        $existedBefore = $this->findTimesheetRow((int) $values['userId'], (int) $values['ticket'], $values['date'], $values['kind']) !== null;
+
+        // Cross-DB upsert on the (userId, ticketId, workDate, kind) unique key. Laravel's upsert()
+        // emits the correct dialect per driver (MySQL ON DUPLICATE KEY, PostgreSQL ON CONFLICT).
+        // On conflict only `hours` is overwritten, matching the previous behaviour.
+        $this->db->table('zp_timesheets')->upsert(
+            [[
+                'userId' => $values['userId'],
+                'ticketId' => $values['ticket'],
+                'workDate' => $values['date'],
+                'hours' => $values['hours'],
+                'kind' => $values['kind'],
+                'invoicedEmpl' => $values['invoicedEmpl'] ?? '',
+                'invoicedComp' => $values['invoicedComp'] ?? '',
+                'invoicedEmplDate' => $values['invoicedEmplDate'] ?? '',
+                'invoicedCompDate' => $values['invoicedCompDate'] ?? '',
+                'rate' => $values['rate'] ?? '',
+                'paid' => $values['paid'] ?? '',
+                'paidDate' => $values['paidDate'] ?? '',
+                'modified' => date('Y-m-d H:i:s'),
+            ]],
+            ['userId', 'ticketId', 'workDate', 'kind'],
+            ['hours'],
+        );
+
+        $this->cleanUpEmptyTimesheets();
+
+        return ! $existedBefore;
+    }
+
+    /**
+     * findTimesheetRow - Look up a single timesheet entry by its natural unique key
+     * (userId, ticketId, workDate, kind), used by the portable upsert paths.
+     */
+    private function findTimesheetRow(int $userId, int $ticketId, string $workDate, string $kind): ?object
+    {
+        return $this->db->table('zp_timesheets')
+            ->where('userId', $userId)
+            ->where('ticketId', $ticketId)
+            ->where('workDate', $workDate)
+            ->where('kind', $kind)
+            ->first();
+    }
+
+    /**
+     * accumulateHours - Add $hours to the day's timesheet entry for a ticket/kind, inserting the
+     * row if it doesn't exist yet. Portable, atomic replacement for MySQL-only
+     * ON DUPLICATE KEY UPDATE that also runs on PostgreSQL.
+     */
+    private function accumulateHours(int $userId, int $ticketId, string $workDate, string $kind, float $hours): void
+    {
+        $now = date('Y-m-d H:i:s');
+
+        // Atomic, DB-side increment. Only affects the row if it already exists, so concurrent
+        // callers can't lose an update the way a read-modify-write would.
+        $affected = $this->db->table('zp_timesheets')
+            ->where('userId', $userId)
+            ->where('ticketId', $ticketId)
+            ->where('workDate', $workDate)
+            ->where('kind', $kind)
+            ->increment('hours', $hours, ['modified' => $now]);
+
+        if ($affected > 0) {
+            return;
+        }
+
+        // No row yet: insert one. Wrapped in a nested transaction so that on PostgreSQL a
+        // unique-key violation from a concurrent insert rolls back to a savepoint instead of
+        // aborting the surrounding punchOut transaction. On conflict, fall back to the increment.
+        try {
+            $this->db->transaction(function () use ($userId, $ticketId, $workDate, $kind, $hours, $now) {
+                $this->db->table('zp_timesheets')->insert([
+                    'userId' => $userId,
+                    'ticketId' => $ticketId,
+                    'workDate' => $workDate,
+                    'hours' => $hours,
+                    'kind' => $kind,
+                    'modified' => $now,
+                ]);
+            });
+        } catch (QueryException $e) {
+            if (! $this->isUniqueConstraintViolation($e)) {
+                throw $e;
+            }
+
+            $this->db->table('zp_timesheets')
+                ->where('userId', $userId)
+                ->where('ticketId', $ticketId)
+                ->where('workDate', $workDate)
+                ->where('kind', $kind)
+                ->increment('hours', $hours, ['modified' => $now]);
+        }
+    }
+
+    /**
+     * accumulateAddTimeRow - Atomically add hours to and prepend the description of the existing
+     * timesheet row on the (userId, ticketId, workDate, kind) unique key. Done as a single DB-side
+     * UPDATE (hours = hours + ?, description via CONCAT) so concurrent addTime() calls can't lose an
+     * update; CONCAT and bound parameters are portable across MySQL and PostgreSQL.
+     */
+    private function accumulateAddTimeRow(array $values, string $now): void
+    {
+        $descriptionPrefix = $values['date']."\n".($values['description'] ?? '')."\n--\n\n";
+
+        $this->db->update(
+            'UPDATE zp_timesheets
+                SET hours = hours + ?,
+                    description = CONCAT(?, description),
+                    modified = ?
+              WHERE userId = ?
+                AND ticketId = ?
+                AND workDate = ?
+                AND kind = ?',
+            [
+                (float) $values['hours'],
+                $descriptionPrefix,
+                $now,
+                (int) $values['userId'],
+                (int) $values['ticket'],
+                $values['date'],
+                $values['kind'],
+            ]
+        );
+    }
+
+    /**
+     * isUniqueConstraintViolation - True when a QueryException is a duplicate/unique-key violation
+     * (SQLSTATE 23000 on MySQL, 23505 on PostgreSQL), used to retry upserts as updates.
+     */
+    private function isUniqueConstraintViolation(QueryException $e): bool
+    {
+        return in_array((string) $e->getCode(), ['23000', '23505'], true);
+    }
+
+    /**
+     * updatTime - update specific time entry
+     */
+    public function updateTime(array $values): void
+    {
+        $this->db->table('zp_timesheets')
+            ->where('id', $values['id'])
+            ->update([
+                'ticketId' => $values['ticket'],
+                'workDate' => $values['date'],
+                'hours' => $values['hours'],
+                'kind' => $values['kind'],
+                'description' => $values['description'],
+                'invoicedEmpl' => $values['invoicedEmpl'],
+                'invoicedComp' => $values['invoicedComp'],
+                'invoicedEmplDate' => $values['invoicedEmplDate'],
+                'invoicedCompDate' => $values['invoicedCompDate'],
+                'paid' => $values['paid'],
+                'paidDate' => $values['paidDate'],
+                'modified' => date('Y-m-d H:i:s'),
+            ]);
+
+        $this->cleanUpEmptyTimesheets();
+    }
+
+    /**
+     * updatTime - update specific time entry
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     */
+    public function updateHours(array $values): void
+    {
+        // TO_DAYS is MySQL-specific, use a workaround for PostgreSQL
+        $wrappedWorkDate = $this->dbHelper->wrapColumn('workDate');
+        $toDaysSql = match ($this->dbHelper->getDriverName()) {
+            'mysql' => "TO_DAYS({$wrappedWorkDate}) = TO_DAYS(?)",
+            'pgsql' => "DATE({$wrappedWorkDate}) = DATE(?)",
+            default => "TO_DAYS({$wrappedWorkDate}) = TO_DAYS(?)",
+        };
+
+        $query = "UPDATE zp_timesheets
+            SET
+                hours = ?,
+                modified = ?
+            WHERE
+                userId = ?
+                AND ticketId = ?
+                AND kind = ?
+                AND {$toDaysSql}
+                LIMIT 1";
+
+        $query = self::dispatch_filter('sql', $query);
+
+        $this->db->update($query, [
+            $values['hours'],
+            date('Y-m-d H:i:s'),
+            $values['userId'],
+            $values['ticket'],
+            $values['kind'],
+            $values['date'],
+        ]);
+
+        $this->cleanUpEmptyTimesheets();
+    }
+
+    /**
+     * updateInvoices
+     */
+    /**
+     * Updates invoice and payment status for timesheet entries.
+     * Uses batch whereIn() queries instead of individual updates per row.
+     *
+     * @param  array  $invEmpl  IDs of timesheets to mark as invoiced to employee.
+     * @param  array  $invComp  IDs of timesheets to mark as invoiced to company.
+     * @param  array  $paid  IDs of timesheets to mark as paid.
+     * @return bool Returns true on success.
+     */
+    public function updateInvoices(array $invEmpl, array $invComp = [], array $paid = []): bool
+    {
+        $now = Carbon::now(session('usersettings.timezone'))->setTimezone('UTC')->format('Y-m-d H:i:s');
+        $modified = date('Y-m-d H:i:s');
+
+        if (! empty($invEmpl)) {
+            $this->db->table('zp_timesheets')
+                ->whereIn('id', $invEmpl)
+                ->update([
+                    'invoicedEmpl' => 1,
+                    'invoicedEmplDate' => $now,
+                    'modified' => $modified,
+                ]);
+        }
+
+        if (! empty($invComp)) {
+            $this->db->table('zp_timesheets')
+                ->whereIn('id', $invComp)
+                ->update([
+                    'invoicedComp' => 1,
+                    'invoicedCompDate' => $now,
+                    'modified' => $modified,
+                ]);
+        }
+
+        if (! empty($paid)) {
+            $this->db->table('zp_timesheets')
+                ->whereIn('id', $paid)
+                ->update([
+                    'paid' => 1,
+                    'paidDate' => $now,
+                    'modified' => $modified,
+                ]);
+        }
+
+        return true;
+    }
+
+    public function deleteTime(int $id): void
+    {
+        $this->db->table('zp_timesheets')
+            ->where('id', $id)
+            ->delete();
+    }
+
+    /**
+     * Get planned hours for a ticket
+     */
+    public function getTicketPlanHours(int $ticketId): float
+    {
+        $query = 'SELECT '.$this->dbHelper->wrapColumn('planHours').' FROM zp_tickets WHERE id = :ticketId LIMIT 1';
+
+        $call = $this->dbcall(func_get_args());
+
+        $call->prepare($query);
+        $call->bindValue(':ticketId', $ticketId);
+
+        $call->execute();
+
+        $result = $call->fetch(PDO::FETCH_ASSOC);
+
+        return (float) ($result['planHours'] ?? 0);
+    }
+
+    /**
+     * Clean up empty timesheets.
+     *
+     * This function deletes all timesheets from the "zp_timesheets" table
+     * where the hours value is equal to 0.
+     */
+    public function cleanUpEmptyTimesheets(): void
+    {
+        $this->db->table('zp_timesheets')
+            ->where('hours', 0)
+            ->delete();
+    }
+}

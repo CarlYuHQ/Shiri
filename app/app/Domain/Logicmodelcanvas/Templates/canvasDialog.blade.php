@@ -1,0 +1,364 @@
+@php
+    use Shiri\Domain\Logicmodelcanvas\Repositories\Logicmodelcanvas;
+
+    $canvasName = 'logicmodel';
+
+    $canvasItem = $tpl->get('canvasItem') ?? [];
+    $canvasItem = array_merge([
+        'id' => '', 'box' => '', 'description' => '', 'conclusion' => '', 'assumptions' => '',
+        'data' => '', 'status' => '', 'relates' => '', 'impact' => '', 'milestoneId' => '',
+        'author' => '', 'authorFirstname' => '', 'authorLastname' => '',
+        'why_this_matters' => '', 'starting_picture' => '',
+    ], is_array($canvasItem) ? $canvasItem : []);
+
+    $canvasTypes = $tpl->get('canvasTypes');
+    $hiddenStatusLabels = $tpl->get('statusLabels');
+    $statusLabels = $statusLabels ?? $hiddenStatusLabels;
+    $hiddenRelatesLabels = $tpl->get('relatesLabels');
+    $relatesLabels = $relatesLabels ?? $hiddenRelatesLabels;
+    $dataLabels = $tpl->get('dataLabels');
+
+    $id = ($canvasItem['id'] ?? '') !== '' ? $canvasItem['id'] : '';
+
+    // Resolve stage color for the pill
+    $stages = Logicmodelcanvas::STAGES;
+    $boxKey = $canvasItem['box'] ?? '';
+    $stageColor = '#888';
+    $stageBg = '#f0f0f0';
+    foreach ($stages as $stage) {
+        if ('lm_' . $stage['key'] === $boxKey) {
+            $stageColor = $stage['color'];
+            $stageBg = $stage['bg'];
+            break;
+        }
+    }
+
+    $currentImpact = (string) ($canvasItem['impact'] ?? '');
+@endphp
+
+<script type="text/javascript">
+    window.onload = function() {
+        if (!window.jQuery) {
+            location.href="{{ BASE_URL }}/{{ $canvasName }}canvas/showCanvas?showModal={{ $canvasItem['id'] }}";
+        }
+    }
+</script>
+
+<div style="width:1000px; padding-bottom:20px;">
+
+    {{-- Header: the stage pill is the title --}}
+    <x-global::actions.modal-header>
+        <x-slot:title>
+        <span style="display:inline-flex; align-items:center; gap:5px; padding:4px 14px; border-radius:20px; font-size:var(--font-size-s); font-weight:600; color:{{ $stageColor }}; background:{{ $stageBg }};">
+            <i class="fas {{ $canvasTypes[$canvasItem['box']]['icon'] ?? 'fa-diagram-project' }}"></i>
+            {{ isset($canvasTypes[$canvasItem['box']]) ? $tpl->__($canvasTypes[$canvasItem['box']]['title']) : '' }}
+        </span>
+        </x-slot:title>
+        @if ($id != '')
+        <x-slot:actions>
+            <li><a href="#/{{ $canvasName }}canvas/delCanvasItem/{{ $id }}" class="delete"><i class="fa fa-trash-can"></i> {{ $tpl->__('links.delete') }}</a></li>
+        </x-slot:actions>
+    @endif
+</x-global::actions.modal-header>
+
+    {!! $tpl->displayNotification() !!}
+
+    <form class="formModal" method="post" action="{{ BASE_URL }}/{{ $canvasName }}canvas/editCanvasItem/{{ $id }}">
+
+        <input type="hidden" value="{{ $tpl->get('currentCanvas') }}" name="canvasId" />
+        <input type="hidden" value="{{ $id }}" name="itemId" id="itemId"/>
+        <input type="hidden" name="milestoneId" value="{{ $canvasItem['milestoneId'] }}" />
+        <input type="hidden" name="changeItem" value="1" />
+        <input type="hidden" name="{{ $dataLabels[3]['field'] }}" value="" />
+
+        <div class="row">
+            {{-- ═══ Left Column: Content ═══ --}}
+            <div class="col-md-8">
+
+                {{-- Title --}}
+                <x-global::forms.text-input width="full" name="description" variant="headline"
+                    value="{{ $tpl->escape($canvasItem['description']) }}"
+                    placeholder="{{ $tpl->__('input.placeholders.short_name') }}" /><br /><br />
+
+                @if ($dataLabels[1]['active'])
+                    <x-global::forms.label>{{ $tpl->__($dataLabels[1]['title']) }}</x-global::forms.label>
+                    <textarea style="width:100%" rows="5" cols="10" name="{{ $dataLabels[1]['field'] }}" class="modalTextArea tiptapSimple">{{ $canvasItem[$dataLabels[1]['field']] }}</textarea><br />
+                @else
+                    <input type="hidden" name="{{ $dataLabels[1]['field'] }}" value="" />
+                @endif
+
+                @if ($dataLabels[2]['active'])
+                    <x-global::forms.label>{{ $tpl->__($dataLabels[2]['title']) }}</x-global::forms.label>
+                    <textarea style="width:100%" rows="3" cols="10" name="{{ $dataLabels[2]['field'] }}" class="modalTextArea tiptapSimple">{{ $canvasItem[$dataLabels[2]['field']] }}</textarea><br />
+                @else
+                    <input type="hidden" name="{{ $dataLabels[2]['field'] }}" value="" />
+                @endif
+
+                {{-- Authored-meaning fields.
+                     `why_this_matters` — Outcome and Impact items (skipped on
+                     Inputs/Activities/Outputs — those are context, not meaning).
+                     `starting_picture` — Impact only.
+                     Labels ARE the prompt; placeholders teach by example.
+                     Impact renders NO suggest control — the friction is the
+                     feature. Outputs/Outcomes get a suggest button (Step 3). --}}
+                @php
+                    $isImpact  = $boxKey === 'lm_impact';
+                    $isOutcome = $boxKey === 'lm_outcomes';
+                    $isOutput  = $boxKey === 'lm_outputs';
+                    $showWhy   = $isImpact || $isOutcome || $isOutput;
+                    $showStart = $isImpact;
+                @endphp
+
+                @if ($showWhy)
+                    <x-global::forms.label for="whyThisMatters" style="display:block;margin-top:8px;">{{ $tpl->__('logicmodel.field.why_this_matters') }}</x-global::forms.label>
+                    <textarea id="whyThisMatters" style="width:100%" rows="3" name="why_this_matters"
+                        maxlength="500"
+                        placeholder="{{ $tpl->__('logicmodel.field.why_this_matters.placeholder') }}"
+                        class="modalTextArea">{{ $canvasItem['why_this_matters'] }}</textarea>
+                    @if (! $isImpact)
+                        {{-- Suggest affordance for Outputs/Outcomes only. Impact
+                             deliberately has none — no draft, no pre-fill. --}}
+                        <div style="margin-top:4px;font-size:12px;color:var(--rd-text-3,#7a8790);">
+                            <button type="button"
+                                    class="lm-suggest-why"
+                                    data-source-title="{{ $tpl->escape($canvasItem['description'] ?? '') }}"
+                                    data-source-body="{{ $tpl->escape($canvasItem['conclusion'] ?? '') }}"
+                                    style="background:none;border:0;padding:0;color:var(--main-titles-color,#004666);cursor:pointer;font-size:12px;font-weight:600;">
+                                <i class="fa fa-lightbulb"></i> {{ $tpl->__('logicmodel.field.why_this_matters.suggest') }}
+                            </button>
+                        </div>
+                    @endif
+                    <br />
+                @else
+                    <input type="hidden" name="why_this_matters" value="{{ $tpl->escape($canvasItem['why_this_matters'] ?? '') }}" />
+                @endif
+
+                @if ($showStart)
+                    <x-global::forms.label for="startingPicture" style="display:block;margin-top:8px;">{{ $tpl->__('logicmodel.field.starting_picture') }}</x-global::forms.label>
+                    <textarea id="startingPicture" style="width:100%" rows="3" name="starting_picture"
+                        maxlength="500"
+                        placeholder="{{ $tpl->__('logicmodel.field.starting_picture.placeholder') }}"
+                        class="modalTextArea">{{ $canvasItem['starting_picture'] }}</textarea>
+                    <br />
+                @else
+                    <input type="hidden" name="starting_picture" value="{{ $tpl->escape($canvasItem['starting_picture'] ?? '') }}" />
+                @endif
+
+                {{-- Suggest handler — pure client-side draft that copies from
+                     the item's title + body. Never runs on Impact (no button
+                     rendered). LLM-backed suggestions can slot in behind the
+                     same UI later; the seed source stays authored text. --}}
+                @if ($showWhy && ! $isImpact)
+                    <script>
+                    (function () {
+                        var btns = document.querySelectorAll('.lm-suggest-why');
+                        btns.forEach(function (btn) {
+                            // The dialog can be re-injected within a session — guard against
+                            // stacking a second listener on an already-bound button.
+                            if (btn.dataset.lmWhyBound) {
+                                return;
+                            }
+                            btn.dataset.lmWhyBound = '1';
+                            btn.addEventListener('click', function () {
+                                var title = (btn.getAttribute('data-source-title') || '').trim();
+                                var body  = (btn.getAttribute('data-source-body')  || '').trim();
+                                // Silence beats generic: skip if we don't have real source text.
+                                if (title.length < 4 && body.length < 12) return;
+                                var draft = body.length >= 20 ? body : title;
+                                var ta = document.getElementById('whyThisMatters');
+                                if (ta && ! ta.value.trim()) {
+                                    ta.value = draft;
+                                    ta.focus();
+                                }
+                            });
+                        });
+                    })();
+                    </script>
+                @endif
+
+                {{-- Comments section moved outside the form to avoid nested forms --}}
+
+            </div>
+
+            {{-- ═══ Right Column: Details Panel ═══ --}}
+            <div class="col-md-4">
+                <div class="lm-details-panel">
+
+                    <div class="lm-details-heading">{{ $tpl->__('label.details') }}</div>
+
+                    {{-- Status --}}
+                    @if (! empty($statusLabels))
+                        <div class="lm-details-row">
+                            <span class="lm-details-label"><i class="fas fa-fw fa-circle-dot"></i> {{ $tpl->__('label.status') }}</span>
+                            <span class="lm-details-value">
+                                @php $statusColorMap = ['blue' => '#1B75BB', 'orange' => '#fdab3d', 'green' => '#75BB1B', 'red' => '#BB1B25', 'grey' => '#c3ccd4']; @endphp
+                                <x-global::forms.select name="status" id="statusCanvas" enhanced :search="false" aria-label="{{ $tpl->__('label.status') }}">
+                                    @foreach ($statusLabels as $key => $data)
+                                        @if ($data['active'])
+                                            <x-global::forms.select.option :value="$key" :selected="$canvasItem['status'] == $key" icon="fas {{ $data['icon'] }}" :color="$statusColorMap[$data['color']] ?? '#666'">{{ $tpl->__($data['title']) }}</x-global::forms.select.option>
+                                        @endif
+                                    @endforeach
+                                </x-global::forms.select>
+                            </span>
+                        </div>
+                    @else
+                        <input type="hidden" name="status" value="{{ $canvasItem['status'] ?? array_key_first($hiddenStatusLabels) }}" />
+                    @endif
+
+                    {{-- Priority --}}
+                    <div class="lm-details-row">
+                        <span class="lm-details-label"><i class="fas fa-fw fa-flag"></i> {{ $tpl->__('logicmodel.priority.label') }}</span>
+                        <span class="lm-details-value">
+                            <x-global::forms.select name="impact" id="priorityCanvas" enhanced :search="false" aria-label="{{ $tpl->__('logicmodel.priority.label') }}">
+                                <option value="" @selected($currentImpact === '')>{{ $tpl->__('logicmodel.priority.none') }}</option>
+                                <x-global::forms.select.option value="1" :selected="$currentImpact === '1'" icon="fas fa-thermometer-full" color="#C73E5C">{{ $tpl->__('logicmodel.priority.critical') }}</x-global::forms.select.option>
+                                <x-global::forms.select.option value="2" :selected="$currentImpact === '2'" icon="fas fa-thermometer-three-quarters" color="#E85A5A">{{ $tpl->__('logicmodel.priority.high') }}</x-global::forms.select.option>
+                                <x-global::forms.select.option value="3" :selected="$currentImpact === '3'" icon="fas fa-thermometer-half" color="#F5A623">{{ $tpl->__('logicmodel.priority.medium') }}</x-global::forms.select.option>
+                                <x-global::forms.select.option value="4" :selected="$currentImpact === '4'" icon="fas fa-thermometer-quarter" color="#2ECC71">{{ $tpl->__('logicmodel.priority.low') }}</x-global::forms.select.option>
+                            </x-global::forms.select>
+                        </span>
+                    </div>
+
+                    {{-- Stage --}}
+                    <div class="lm-details-row">
+                        <span class="lm-details-label"><i class="fas fa-fw fa-layer-group"></i> {{ $tpl->__('logicmodel.stage.label') }}</span>
+                        <span class="lm-details-value">
+                            <x-global::forms.select name="box" id="stageCanvas" enhanced :search="false" aria-label="{{ $tpl->__('logicmodel.stage.label') }}">
+                                @foreach ($stages as $num => $stage)
+                                    @php $stageBoxKey = 'lm_' . $stage['key']; @endphp
+                                    <x-global::forms.select.option :value="$stageBoxKey" :selected="$boxKey === $stageBoxKey" icon="fas {{ $stage['icon'] }}" :color="$stage['color']">{{ $tpl->__($stage['title']) }}</x-global::forms.select.option>
+                                @endforeach
+                            </x-global::forms.select>
+                        </span>
+                    </div>
+
+                    @if (! empty($relatesLabels))
+                        <div class="lm-details-row">
+                            <span class="lm-details-label"><i class="fas fa-fw fa-link"></i> {{ $tpl->__('label.relates') }}</span>
+                            <span class="lm-details-value">
+                                <x-global::forms.select name="relates" id="relatesCanvas" enhanced :search="false">
+                                    @foreach ($relatesLabels as $key => $data)
+                                        @if ($data['active'])
+                                            <x-global::forms.select.option :value="$key" :selected="$canvasItem['relates'] == $key" icon="fas {{ $data['icon'] }}">{{ $tpl->__($data['title']) }}</x-global::forms.select.option>
+                                        @endif
+                                    @endforeach
+                                </x-global::forms.select>
+                            </span>
+                        </div>
+                    @else
+                        <input type="hidden" name="relates" value="{{ $canvasItem['relates'] ?? array_key_first($hiddenRelatesLabels) }}" />
+                    @endif
+
+                    {{-- Author (read-only) --}}
+                    @if ($id !== '' && ($canvasItem['author'] ?? '') !== '')
+                        <div class="lm-details-row">
+                            <span class="lm-details-label"><i class="fas fa-fw fa-user"></i> {{ $tpl->__('label.author') }}</span>
+                            <span class="lm-details-value lm-details-text">{{ $canvasItem['authorFirstname'] ?? '' }} {{ $canvasItem['authorLastname'] ?? '' }}</span>
+                        </div>
+                    @endif
+
+                </div>
+
+                {{-- Plugin hook for additional right-panel content (e.g. project links) --}}
+                @if ($id !== '')
+                    @dispatchEvent('canvas.dialog.afterDetails', [
+                        'canvasItem' => $canvasItem,
+                        'canvasName' => $canvasName,
+                        'canvasId' => (int) session('currentLOGICMODELCanvas'),
+                    ])
+                @endif
+
+            </div>
+        </div>
+
+        {{-- ═══ Bottom: Actions ═══ --}}
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:16px; padding-top:16px; border-top:1px solid var(--main-border-color);">
+            @if ($login::userIsAtLeast($roles::$editor))
+                <x-global::forms.button tag="input" inputType="submit" :labelText="$tpl->__('buttons.save')" id="primaryCanvasSubmitButton" contentRole="primary"/>
+                <x-global::forms.button inputType="submit" contentRole="secondary" value="closeModal" id="saveAndClose" onclick="shiri.canvasController.setCloseModal();">{!! $tpl->__('buttons.save_and_close') !!}</x-global::forms.button>
+            @endif
+
+        </div>
+
+    </form>
+
+    {{-- Comments section rendered OUTSIDE the main form to avoid nested forms.
+         The comments submodule has its own <form> which would break the outer form. --}}
+    @if ($id !== '')
+        <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--main-border-color);">
+            <x-global::elements.section-header icon="fa fa-comments">{{ $tpl->__('subtitles.discussion') }}</x-global::elements.section-header>
+            <input type="hidden" name="comment" value="1" />
+            @include('comments::submodules.generalComment', ['formUrl' => '/' . $canvasName . 'canvas/editCanvasItem/' . $id])
+        </div>
+    @endif
+
+</div>
+
+<style>
+    .lm-details-panel {
+        border-left: 1px solid var(--main-border-color);
+        padding-left: 20px;
+        margin-left: 5px;
+    }
+    .lm-details-heading {
+        font-size: var(--font-size-s);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--primary-font-color);
+        padding-bottom: 10px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid var(--main-border-color);
+    }
+    .lm-details-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 0;
+        min-height: 40px;
+    }
+    .lm-details-label {
+        font-size: var(--font-size-s);
+        font-weight: 500;
+        color: var(--primary-font-color);
+        white-space: nowrap;
+    }
+    .lm-details-label i {
+        color: var(--secondary-font-color);
+        margin-right: 4px;
+    }
+    .lm-details-value {
+        text-align: right;
+    }
+    .lm-details-value .ss-main {
+        min-width: 120px;
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    .lm-details-value .ss-main .ss-values {
+        justify-content: flex-end;
+    }
+    .lm-details-text {
+        font-size: var(--font-size-s);
+        color: var(--primary-font-color);
+    }
+</style>
+
+<script type="text/javascript">
+    jQuery(document).ready(function(){
+
+        if (window.shiri && window.shiri.tiptapController) {
+            shiri.tiptapController.initSimpleEditor();
+        }
+
+        @if (! $login::userIsAtLeast($roles::$editor))
+            shiri.authController.makeInputReadonly("#global-modal-content");
+        @endif
+
+        @if ($login::userHasRole([$roles::$commenter]))
+            shiri.commentsController.enableCommenterForms();
+        @endif
+
+    })
+</script>

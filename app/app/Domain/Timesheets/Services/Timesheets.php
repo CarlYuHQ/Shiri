@@ -1,0 +1,1418 @@
+<?php
+
+namespace Shiri\Domain\Timesheets\Services;
+
+use Carbon\Carbon;
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Support\Facades\Log;
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Domains\BaseService;
+use Shiri\Core\Exceptions\AuthorizationException;
+use Shiri\Core\Exceptions\MissingParameterException;
+use Shiri\Core\Language;
+use Shiri\Core\Modules\ProjectModules;
+use Shiri\Domain\Tickets\Models\Tickets;
+use Shiri\Domain\Tickets\Permissions\TicketsPermissions;
+use Shiri\Domain\Tickets\Repositories\Tickets as TicketRepository;
+use Shiri\Domain\Timesheets\Events\TimeEntryCreated;
+use Shiri\Domain\Timesheets\Events\TimerStarted;
+use Shiri\Domain\Timesheets\Events\TimerStopped;
+use Shiri\Domain\Timesheets\Permissions\TimesheetsPermissions;
+use Shiri\Domain\Timesheets\Repositories\Timesheets as TimesheetRepository;
+use Shiri\Domain\Users\Repositories\Users;
+
+/**
+ * Timesheets service.
+ *
+ * Timesheets are GLOBAL-scoped (company-wide time logging): every gate resolves the user's
+ * GLOBAL role via {@see TimesheetsPermissions}. The standard verbs (view/create/edit/delete) are
+ * editor+ and operate on the user's OWN time — ownership is enforced in-body by comparing the
+ * entry's userId to the current user; acting on ANOTHER user's time, invoicing, and the
+ * cross-user reports require timesheets.manage (manager+).
+ *
+ * Two-tier denial: the base capability is checked with {@see authorize()}, which throws
+ * AuthorizationException when the role lacks create/edit/manage; the ownership check that follows
+ * soft-denies (deleteTime() returns false, updateTime() returns early) rather than throwing, so a
+ * manager-less user editing a peer's entry is a silent no-op, not a 403. Reads soft-deny (return
+ * the neutral empty value) for the unauthorized/cross-user case.
+ *
+ * NOTE: the ticket-hours reads (getLoggedHoursForTicketByDate / getSumLoggedHoursForTicket /
+ * getRemainingHours / getUsersTicketHours) carry NO timesheets.* role gate — they render on the
+ * ticket view (ShowTicket, reachable by readonly users). They are scoped instead by
+ * {@see authorizeTicketView()}: tickets.view on the ticket's REAL project, so a caller-supplied
+ * ticket id cannot read hours across projects the caller is not a member of.
+ *
+ * Project modules: when a project has the Timesheets module switched off, no time can be booked
+ * on its tickets (log, add, edit, timer start/stop all go through
+ * {@see authorizeTicketForTimeEntry()}). Existing entries stay readable, deletable and
+ * invoiceable: they are payroll and billing records.
+ */
+class Timesheets extends BaseService
+{
+    private TimesheetRepository $timesheetsRepo;
+
+    private Users $userRepo;
+
+    private TicketRepository $ticketRepo;
+
+    /**
+     * The placeholder date returned from the database when no date has been set.
+     */
+    public const EMPTY_DATE = '0000-00-00 00:00:00';
+
+    public array $kind = [
+        'GENERAL_BILLABLE' => 'label.general_billable',
+        'GENERAL_NOT_BILLABLE' => 'label.general_not_billable',
+        'PROJECTMANAGEMENT' => 'label.projectmanagement',
+        'DEVELOPMENT' => 'label.development',
+        'BUGFIXING_NOT_BILLABLE' => 'label.bugfixing_not_billable',
+        'TESTING' => 'label.testing',
+    ];
+
+    public function __construct(
+        TimesheetRepository $timesheetsRepo,
+        Users $userRepo,
+        TicketRepository $ticketRepo,
+        private ProjectModules $projectModules,
+    ) {
+        $this->timesheetsRepo = $timesheetsRepo;
+        $this->userRepo = $userRepo;
+        $this->ticketRepo = $ticketRepo;
+    }
+
+    /**
+     * Non-throwing READ check for a timesheet belonging to $ownerUserId: own → timesheets.view,
+     * else → timesheets.manage. For soft-deny reads (no cross-user existence oracle).
+     */
+    private function canViewTimeForUser(int $ownerUserId): bool
+    {
+        return $ownerUserId === $this->currentUserId()
+            ? $this->can(TimesheetsPermissions::VIEW)
+            : $this->can(TimesheetsPermissions::MANAGE);
+    }
+
+    /**
+     * isClocked - Checks to see whether a user is clocked in
+     *
+     *
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true)]
+    public function isClocked(int $sessionId): false|array
+    {
+        return $this->timesheetsRepo->isClocked($sessionId);
+    }
+
+    /**
+     * Start the session user's timer on a ticket.
+     *
+     * Besides the (global) timesheets.create capability, the ticket must exist and the caller must
+     * be able to view its real project — time cannot be tracked on another project's tickets.
+     *
+     * @param  int  $ticketId  The ticket to clock in on.
+     * @return mixed The repository result (true on success).
+     *
+     * @throws AuthorizationException When the ticket is unknown or not accessible.
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true, entityScoped: true)]
+    public function punchIn(int $ticketId): mixed
+    {
+        $this->authorize(TimesheetsPermissions::CREATE);
+        $this->authorizeTicketForTimeEntry($ticketId);
+
+        $started = $this->timesheetsRepo->punchIn($ticketId);
+
+        if ($started) {
+            TimerStarted::dispatch(ticketId: $ticketId);
+        }
+
+        return $started;
+    }
+
+    /**
+     * Stop the session user's timer on a ticket and book the elapsed time.
+     *
+     * The ticket's project is re-checked at stop time: if the caller can no longer access the
+     * ticket (access revoked while the timer ran, or a timer started before the start-time check
+     * existed), the timer is discarded and no time is booked.
+     *
+     * @param  int  $ticketId  The ticket the timer runs on.
+     * @param  bool  $automatic  True when the timer is stopped by the system (the ticket was completed),
+     *                           not by the user; reported on {@see TimerStopped}.
+     * @return float|false|int Hours booked, or false when nothing was booked.
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true)]
+    public function punchOut(int $ticketId, bool $automatic = false): float|false|int
+    {
+        if (! $this->canBookTimeOnTicket($ticketId)) {
+            $this->timesheetsRepo->discardPunch($ticketId);
+
+            return false;
+        }
+
+        $hoursBooked = $this->timesheetsRepo->punchOut($ticketId);
+
+        if ($hoursBooked !== false) {
+            TimerStopped::dispatch(ticketId: $ticketId, hours: (float) $hoursBooked, automatic: $automatic);
+        }
+
+        return $hoursBooked;
+    }
+
+    /**
+     * Whether time may still be booked on $ticketId: the base timesheets.create capability AND
+     * access to the ticket's project. Re-checked at stop time because direct callers (HTMX
+     * stopwatch, MCP tools) do not pass the attribute gate and either right may have been
+     * revoked while the timer ran.
+     *
+     * @param  int  $ticketId  The ticket the time would be booked on.
+     */
+    private function canBookTimeOnTicket(int $ticketId): bool
+    {
+        if (! $this->can(TimesheetsPermissions::CREATE)) {
+            return false;
+        }
+
+        try {
+            $this->authorizeTicketForTimeEntry($ticketId);
+        } catch (AuthorizationException) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Stop the active timer for the current user (no ticket ID required)
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true)]
+    public function stopActiveTimer(): float|false|int
+    {
+        $userId = session('userdata.id');
+        if (! $userId) {
+            return false;
+        }
+
+        $clockedStatus = $this->timesheetsRepo->isClocked($userId);
+        if ($clockedStatus === false || ! isset($clockedStatus['id'])) {
+            return false;
+        }
+
+        return $this->punchOut((int) $clockedStatus['id']);
+    }
+
+    /**
+     * logTime, will always add hours or increment existing values
+     *
+     *
+     *
+     * @throws BindingResolutionException
+     * @throws MissingParameterException
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true, entityScoped: true)]
+    public function logTime(int $ticketId, array $params): array|bool
+    {
+        // Editor+ to log any time; non-managers are pinned to their own account (cannot log for
+        // another user — that needs timesheets.manage).
+        $this->authorize(TimesheetsPermissions::CREATE);
+        $projectId = $this->authorizeTicketForTimeEntry($ticketId);
+        if (! $this->can(TimesheetsPermissions::MANAGE)) {
+            $params['userId'] = $this->currentUserId();
+        }
+
+        // @TODO: Change to use value objects for more type safeness.
+        $values = [
+            'userId' => $params['userId'] ?? session('userdata.id'),
+            'ticket' => $ticketId,
+            'date' => '',
+            'kind' => $params['kind'] ?? '',
+            'hours' => '',
+            'rate' => '',
+            'description' => '',
+            'invoicedEmpl' => '',
+            'invoicedComp' => '',
+            'invoicedEmplDate' => '',
+            'invoicedCompDate' => '',
+            'paid' => '',
+        ];
+
+        if (! empty($params['dateString'])) {
+            $values['date'] = dtHelper()->parseUserDateTime($params['dateString'], 'start')->formatDateTimeForDb();
+        } elseif (! empty($params['timestamp'])) {
+            $values['date'] = CarbonImmutable::createFromTimestamp($params['timestamp'], 'UTC')->format('Y-m-d H:i:s');
+        } elseif (! empty($params['date']) && empty($params['time'])) {
+            $values['date'] = dtHelper()->parseUserDateTime($params['date'], 'start')->formatDateTimeForDb();
+        } elseif (! empty($params['date'])) {
+            $values['date'] = dtHelper()->parseUserDateTime($params['date'], $params['time'])->formatDateTimeForDb();
+        } else {
+            throw new MissingParameterException('Date or timestamp is a required field');
+        }
+
+        if (! isset($params['hours'])) {
+            throw new MissingParameterException('Hours is a required field');
+        }
+
+        if (! isset($params['kind'])) {
+            throw new MissingParameterException('Timesheet type is a required field');
+        }
+
+        $values['hours'] = $params['hours'];
+        $values['description'] = $params['description'] ?? '';
+
+        $loggingUser = $this->userRepo->getUser($values['userId']);
+        $values['rate'] = $loggingUser['wage'];
+
+        $isNewEntry = $this->timesheetsRepo->addTime($values);
+        $this->dispatchTimeEntryCreated($isNewEntry, $ticketId, $values['hours'], $projectId);
+
+        return true;
+    }
+
+    /**
+     * Upserts a time entry for a ticket. Will update hours based on the values provided, not touching descriptions
+     *
+     * @param  int  $ticketId  The ID of the ticket.
+     * @param  array  $params  An associative array of parameters for the time entry.
+     *                         - userId: The ID of the user creating the time entry. Defaults to the ID of the logged-in user.
+     *                         - kind: The type of timesheet entry. Required.
+     *                         - date: The date of the time entry. Required.
+     *                         - hours: The number of hours for the time entry. Required.
+     * @return array|bool Returns true if the time entry was successfully upserted.
+     *
+     * @throws MissingParameterException If any of the required parameters are missing.
+     * @throws BindingResolutionException
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true, entityScoped: true)]
+    public function upsertTime(int $ticketId, array $params): array|bool
+    {
+        // Editor+ to log any time; non-managers are pinned to their own account.
+        $this->authorize(TimesheetsPermissions::CREATE);
+        $projectId = $this->authorizeTicketForTimeEntry($ticketId);
+        if (! $this->can(TimesheetsPermissions::MANAGE)) {
+            $params['userId'] = $this->currentUserId();
+        }
+
+        // @TODO: Change to use value objects for more type safeness.
+        $values = [
+            'userId' => $params['userId'] ?? session('userdata.id'),
+            'ticket' => $ticketId,
+            'date' => '',
+            'kind' => $params['kind'] ?? '',
+            'hours' => '',
+            'rate' => '',
+            'invoicedEmpl' => '',
+            'invoicedComp' => '',
+            'invoicedEmplDate' => '',
+            'invoicedCompDate' => '',
+            'paid' => '',
+        ];
+
+        // Either date, dateString or timestamp is required
+        if (! isset($params['date']) && empty($params['timestamp']) && empty($params['dateString'])) {
+            throw new MissingParameterException('Date or timestamp is a required field');
+        }
+
+        if (! isset($params['hours'])) {
+            throw new MissingParameterException('Hours is a required field');
+        }
+
+        if (! isset($params['kind'])) {
+            throw new MissingParameterException('Timesheet type is a required field');
+        }
+
+        if (! empty($params['dateString'])) {
+            $values['date'] = dtHelper()->parseUserDateTime($params['dateString'], 'start')->formatDateTimeForDb();
+        } elseif (! empty($params['timestamp'])) {
+            $values['date'] = CarbonImmutable::createFromTimestamp($params['timestamp'], 'UTC')->format('Y-m-d H:i:s');
+        } else {
+            $values['date'] = dtHelper()->parseUserDateTime($params['date'], 'start')->formatDateTimeForDb();
+        }
+
+        $values['hours'] = $params['hours'];
+
+        $loggingUser = $this->userRepo->getUser($values['userId']);
+        $values['rate'] = $loggingUser['wage'];
+
+        $isNewEntry = $this->timesheetsRepo->upsertTimesheetEntry($values);
+        $this->dispatchTimeEntryCreated($isNewEntry, $ticketId, $values['hours'], $projectId);
+
+        return true;
+    }
+
+    /**
+     * Fire {@see TimeEntryCreated} for a write that inserted a NEW timesheet row with hours.
+     * Hours added onto (or overwriting) an existing row, and empty entries, do not fire.
+     *
+     * @param  bool  $isNewEntry  Whether the repository inserted a new row.
+     * @param  int|null  $ticketId  The ticket the time was booked on.
+     * @param  mixed  $hours  The booked hours (as submitted).
+     * @param  int|null  $projectId  The ticket's project.
+     */
+    private function dispatchTimeEntryCreated(bool $isNewEntry, ?int $ticketId, mixed $hours, ?int $projectId): void
+    {
+        if (! $isNewEntry || ! is_numeric($hours) || (float) $hours <= 0) {
+            return;
+        }
+
+        TimeEntryCreated::dispatch(ticketId: $ticketId, hours: (float) $hours, projectId: $projectId);
+    }
+
+    /**
+     * Delete a timesheet entry.
+     * The caller must be the entry owner or have at least manager role.
+     *
+     * @param  int  $id  The ID of the timesheet entry to delete
+     * @return bool True if deleted, false if unauthorized or not found
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::DELETE, global: true, entityScoped: true)]
+    public function deleteTime(int $id): bool
+    {
+        $timesheet = $this->timesheetsRepo->getTimesheet($id);
+
+        if (! $timesheet) {
+            return false;
+        }
+
+        $ownerId = (int) ($timesheet['userId'] ?? 0);
+
+        // Own entry → timesheets.delete (editor+); another user's entry → timesheets.manage.
+        $allowed = $ownerId === $this->currentUserId()
+            ? $this->can(TimesheetsPermissions::DELETE)
+            : $this->can(TimesheetsPermissions::MANAGE);
+
+        if (! $allowed) {
+            return false;
+        }
+
+        $this->timesheetsRepo->deleteTime($id);
+
+        return true;
+    }
+
+    /**
+     * Retrieve a single timesheet entry by ID.
+     *
+     * @param  int  $id  The timesheet entry ID
+     * @return mixed The timesheet entry or false if not found
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true, entityScoped: true)]
+    public function getTimesheet(int $id): mixed
+    {
+        $timesheet = $this->timesheetsRepo->getTimesheet($id);
+
+        if (! $timesheet) {
+            return false;
+        }
+
+        // Soft-deny: own → timesheets.view, another user's → timesheets.manage. An unauthorized
+        // entry returns the same false as a missing one (no cross-user existence oracle).
+        if (! $this->canViewTimeForUser((int) ($timesheet['userId'] ?? 0))) {
+            return false;
+        }
+
+        return $timesheet;
+    }
+
+    /**
+     * Add a new time entry directly from a prepared values array.
+     *
+     * When called via API, the userId is forced to the authenticated user
+     * unless the caller is a manager or above.
+     *
+     * @param  array  $values  The time entry values
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::CREATE, global: true, entityScoped: true)]
+    public function addTime(array $values): void
+    {
+        $this->authorize(TimesheetsPermissions::CREATE);
+        $projectId = $this->authorizeTicketForTimeEntry($values['ticket'] ?? null);
+
+        // Non-managers can only add time entries for themselves.
+        if (! $this->can(TimesheetsPermissions::MANAGE)) {
+            $values['userId'] = $this->currentUserId();
+        }
+
+        $isNewEntry = $this->timesheetsRepo->addTime($values);
+        $this->dispatchTimeEntryCreated($isNewEntry, (int) $values['ticket'], $values['hours'] ?? null, $projectId);
+    }
+
+    /**
+     * Update an existing time entry.
+     *
+     * When called via API, only the entry owner or a manager+ can update.
+     * Non-managers cannot reassign entries to other users.
+     *
+     * @param  array  $values  The updated time entry values
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::EDIT, global: true, entityScoped: true)]
+    public function updateTime(array $values): void
+    {
+        $this->authorize(TimesheetsPermissions::EDIT);
+
+        // The write sets ticketId from the payload, so the (possibly new) ticket must be accessible.
+        $this->authorizeTicketForTimeEntry($values['ticket'] ?? null);
+
+        $currentUserId = $this->currentUserId();
+
+        // Editing an existing entry that belongs to ANOTHER user requires timesheets.manage.
+        if (isset($values['id'])) {
+            $existing = $this->timesheetsRepo->getTimesheet($values['id']);
+
+            if (! $existing) {
+                return;
+            }
+
+            // The entry's CURRENT ticket must be accessible too — otherwise an entry booked on
+            // another project's ticket could be rewritten (or moved) by id.
+            $this->authorizeTicketForTimeEntry($existing['ticketId'] ?? null);
+
+            if ((int) $existing['userId'] !== $currentUserId && ! $this->can(TimesheetsPermissions::MANAGE)) {
+                return;
+            }
+        }
+
+        // Non-managers cannot reassign an entry to someone else.
+        if (! $this->can(TimesheetsPermissions::MANAGE)) {
+            $values['userId'] = $currentUserId;
+        }
+
+        $this->timesheetsRepo->updateTime($values);
+    }
+
+    /**
+     * Process and save weekly timesheet entries from the weekly view form.
+     *
+     * Parses pipe-delimited form keys (ticketId|kind|date|timestamp) and upserts
+     * each time entry. Returns an array of notification messages.
+     *
+     * @param  array  $postData  The raw POST data from the weekly timesheet form
+     * @return array{type: string, message: string}[] Notification messages
+     *
+     * @throws BindingResolutionException
+     */
+    public function saveWeeklyTimesheetEntries(array $postData): array
+    {
+        $notifications = [];
+
+        foreach ($postData as $key => $dateEntry) {
+            $tempData = explode('|', $key);
+
+            if (count($tempData) !== 4) {
+                continue;
+            }
+
+            $ticketId = $tempData[0];
+            $kind = $tempData[1];
+            $date = $tempData[2];
+            $timestamp = $tempData[3];
+            $hours = $dateEntry;
+
+            // $ticketId comes from explode('|', ...) so it's always a string; compare
+            // as strings. The placeholder row is keyed "new|...", but treat a "0"/empty
+            // id as a placeholder too rather than a real ticket. (#3210 review)
+            $isNewEntryRow = in_array($ticketId, ['new', '0', ''], true);
+
+            // The weekly grid includes an "add new task" placeholder row whose
+            // day cells are submitted empty. There's nothing to log for that row
+            // when no hours were entered, so skip it instead of pushing empty
+            // values through upsertTime. Existing-ticket cells are intentionally
+            // left alone here so clearing a previously logged value still works
+            // (an emptied cell falls through and is cleaned up downstream). (#3210)
+            if ($isNewEntryRow && ! is_numeric($hours)) {
+                continue;
+            }
+
+            if ($isNewEntryRow) {
+                // Only a canonical integer id counts; anything else ('12abc', ' 12', '+12') is "no ticket".
+                $rawNewTicketId = $postData['ticketId'] ?? '';
+                $ticketId = (is_int($rawNewTicketId) || is_string($rawNewTicketId)) && ctype_digit((string) $rawNewTicketId)
+                    ? (int) $rawNewTicketId
+                    : 0;
+                $kind = $postData['kindId'];
+
+                if ($ticketId == 0 && $hours > 0) {
+                    $notifications[] = ['type' => 'error', 'message' => __('notifications.task_id_required_new_entries')];
+
+                    return $notifications;
+                }
+            }
+
+            $values = [
+                'userId' => session('userdata.id'),
+                'ticket' => $ticketId,
+                'date' => $date,
+                'timestamp' => $timestamp,
+                'hours' => $hours,
+                'kind' => $kind,
+            ];
+
+            if ($timestamp === 'false' || $timestamp == false) {
+                continue;
+            }
+
+            // Only canonical positive integer ticket ids are logged: a malformed key such as
+            // '12abc' must not be silently cast onto ticket 12. Placeholder rows have nothing to log.
+            if (! ctype_digit((string) $ticketId) || (int) $ticketId <= 0) {
+                continue;
+            }
+
+            try {
+                $this->upsertTime((int) $ticketId, $values);
+                $notifications[] = ['type' => 'success', 'message' => __('notifications.timesheet_saved_successfully')];
+            } catch (\Exception $e) {
+                $notifications[] = ['type' => 'error', 'message' => sprintf(__('notifications.error_logging_time'), $e->getMessage())];
+                report($e);
+            }
+        }
+
+        return $notifications;
+    }
+
+    /**
+     * @api
+     */
+    public function getLoggedHoursForTicketByDate(int $ticketId): array
+    {
+        $this->authorizeTicketView($ticketId);
+
+        return $this->timesheetsRepo->getLoggedHoursForTicket($ticketId);
+    }
+
+    /**
+     * Authorizes a time-entry WRITE against the real project of the ticket it is booked on.
+     *
+     * The timesheets.* capabilities are GLOBAL (they carry no project membership), so on their
+     * own they would let a caller book time onto any ticket id in any project. This loads the
+     * ticket server-side and requires tickets.view (role + membership) in ITS project, and the
+     * Timesheets module to be on there (Project settings -> Modules). The module check comes
+     * after the membership check, so a non-member learns nothing about the project's settings.
+     *
+     * @param  mixed  $ticketId  The ticket id from the payload.
+     * @return int The ticket's project id.
+     *
+     * @throws AuthorizationException When the id is invalid, the ticket is unknown, not accessible,
+     *                                or its project has Timesheets switched off.
+     */
+    private function authorizeTicketForTimeEntry(mixed $ticketId): int
+    {
+        $ticketId = is_int($ticketId) || is_string($ticketId) ? filter_var($ticketId, FILTER_VALIDATE_INT) : false;
+        if ($ticketId === false || $ticketId <= 0) {
+            throw new AuthorizationException;
+        }
+
+        $ticket = $this->ticketRepo->getTicket($ticketId);
+        if (! $ticket || empty($ticket->projectId)) {
+            throw new AuthorizationException;
+        }
+
+        $this->authorize(TicketsPermissions::VIEW, (int) $ticket->projectId);
+
+        if (! $this->projectModules->isEnabled('timesheets', (int) $ticket->projectId)) {
+            throw new AuthorizationException(app(Language::class)->__('notifications.timesheets_switched_off'));
+        }
+
+        return (int) $ticket->projectId;
+    }
+
+    /**
+     * Authorizes VIEW on the real project of a ticket before exposing its hours.
+     *
+     * The hour lookups are keyed by a caller-supplied ticket id, so without this any
+     * authenticated caller could read logged/remaining hours across every project.
+     *
+     * @throws AuthorizationException
+     */
+    private function authorizeTicketView(int $ticketId): void
+    {
+        $ticket = $this->ticketRepo->getTicket($ticketId);
+
+        if (! $ticket) {
+            throw new AuthorizationException;
+        }
+
+        $this->authorize(TicketsPermissions::VIEW, (int) $ticket->projectId);
+    }
+
+    /**
+     * @return int|mixed
+     *
+     * @api
+     */
+    public function getSumLoggedHoursForTicket(int $ticketId): mixed
+    {
+        $result = $this->getLoggedHoursForTicketByDate($ticketId);
+
+        $allHours = 0;
+        foreach ($result as $row) {
+            if ($row['summe']) {
+                $allHours += $row['summe'];
+            }
+        }
+
+        return $allHours;
+    }
+
+    /**
+     * Get remaining hours for a ticket (planned hours minus logged hours)
+     *
+     * @param  int|Tickets  $ticketOrId  Ticket ID or Tickets object
+     * @return int|mixed
+     *
+     * @api
+     */
+    public function getRemainingHours(int|Tickets $ticketOrId): mixed
+    {
+        // Support both ticket ID (for API calls) and Tickets object (for internal use)
+        if ($ticketOrId instanceof Tickets) {
+            $ticketId = $ticketOrId->id;
+            $planHours = $ticketOrId->planHours;
+        } else {
+            $ticketId = $ticketOrId;
+            // Authorize BEFORE touching the ticket's plan hours: the id is caller-supplied.
+            $this->authorizeTicketView($ticketId);
+            $planHours = $this->timesheetsRepo->getTicketPlanHours($ticketId);
+        }
+
+        $totalHoursLogged = $this->getSumLoggedHoursForTicket($ticketId);
+
+        $remaining = $planHours - $totalHoursLogged;
+
+        if ($remaining < 0) {
+            $remaining = 0;
+        }
+
+        return $remaining;
+    }
+
+    /**
+     * @return int|mixed
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true, entityScoped: true)]
+    public function getUsersTicketHours(int $ticketId, int $userId): mixed
+    {
+        $this->authorizeTicketView($ticketId);
+
+        // Own hours render on the ticket page for any role with ticket access; ANOTHER user's
+        // hours require timesheets.manage (soft-deny to 0, no cross-user leak).
+        if ($userId !== $this->currentUserId() && ! $this->can(TimesheetsPermissions::MANAGE)) {
+            return 0;
+        }
+
+        return $this->timesheetsRepo->getUsersTicketHours($ticketId, $userId);
+    }
+
+    /**
+     * @return array|string[]
+     *
+     * @api
+     */
+    public function getLoggableHourTypes(): array
+    {
+        return $this->timesheetsRepo->kind;
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true, entityScoped: true)]
+    public function getAll(CarbonInterface $dateFrom, CarbonInterface $dateTo, int $projectId = -1, string $kind = 'all', ?int $userId = null, string $invEmpl = '-1', string $invComp = '-1', string $ticketFilter = '-1', string $paid = '-1', string $clientId = '-1'): array|false
+    {
+        // Scoped to your OWN entries (an explicit current-user filter) → timesheets.view (editor+).
+        // Anything broader — another user, or the all-users company report (userId null) — needs
+        // timesheets.manage (manager+). Callers wanting their own data must pass their own userId.
+        if ($userId !== null && $userId === $this->currentUserId()) {
+            $this->authorize(TimesheetsPermissions::VIEW);
+        } else {
+            $this->authorize(TimesheetsPermissions::MANAGE);
+        }
+
+        return $this->timesheetsRepo->getAll(
+            id: $projectId,
+            kind: $kind,
+            dateFrom: $dateFrom,
+            dateTo: $dateTo,
+            userId: $userId,
+            invEmpl: $invEmpl,
+            invComp: $invComp,
+            paid: $paid,
+            clientId: (int) $clientId,
+            ticketFilter: (int) $ticketFilter
+        );
+    }
+
+    /**
+     * @throws BindingResolutionException
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true, entityScoped: true)]
+    public function getWeeklyTimesheets(int $projectId, CarbonInterface $fromDate, int $userId = 0): array
+    {
+        // Own week (default 0, or an explicit current-user filter) → timesheets.view; another
+        // user's week → timesheets.manage.
+        if ($userId === 0 || $userId === $this->currentUserId()) {
+            $this->authorize(TimesheetsPermissions::VIEW);
+        } else {
+            $this->authorize(TimesheetsPermissions::MANAGE);
+        }
+
+        // Get timesheet entries and group by day
+        $allTimesheets = $this->timesheetsRepo->getWeeklyTimesheets(
+            projectId: $projectId,
+            fromDate: $fromDate,
+            userId: $userId
+        );
+
+        // The week's day columns follow the user's LOCAL calendar days. Flat UTC +Nd math
+        // drifts an hour across a DST transition, which put Monday entries into the previous
+        // week's Sunday column (#3310).
+        $weekStartLocal = CarbonImmutable::instance($fromDate)->setToUserTimezone()->startOfDay();
+
+        // Timesheets are grouped by ticketId + type
+        $timesheetGroups = [];
+        foreach ($allTimesheets as $timesheet) {
+
+            try {
+                $currentWorkDate = dtHelper()->parseDbDateTime($timesheet['workDate']);
+            } catch (\Exception $e) {
+                Log::warning($e);
+
+                continue;
+            }
+            // Detect timezone offset
+
+            $workdateOffsetStart = (int) ($currentWorkDate->setToUserTimezone()->secondsSinceMidnight() / 60 / 60);
+
+            // Various Entries can be in different timezones and thus would not be caught by upsert or grouping by
+            // default Creating new rows for each timezone adjustment
+            // to avoid timezone collisions we disable adding new times to rows that were created in an different timezone
+            $timezonedTime = $currentWorkDate->format('H:i:s');
+
+            $groupKey = $timesheet['ticketId'].'-'.$timesheet['kind'].'-'.$timezonedTime;
+            if (! isset($timesheetGroups[$groupKey])) {
+                $timesheetGroups[$groupKey] = [
+                    'kind' => $timesheet['kind'],
+                    'clientName' => $timesheet['clientName'],
+                    'name' => $timesheet['name'],
+                    'headline' => $timesheet['headline'],
+                    'ticketId' => $timesheet['ticketId'],
+                    'hasTimesheetOffset' => $workdateOffsetStart !== 0,
+                    'rowSum' => 0,
+                ];
+
+                // Build the 7 day columns from the user's local calendar days and convert the
+                // boundaries back to UTC. addDays() in the local timezone keeps each column
+                // anchored at local midnight even when the week contains a DST transition.
+                for ($i = 1; $i < 8; $i++) {
+                    $dayStartLocal = $weekStartLocal->addDays($i - 1);
+                    $dayStartUtc = $dayStartLocal->setToDbTimezone();
+                    $timesheetGroups[$groupKey]['day'.$i] = [
+                        'start' => $dayStartUtc,
+                        'end' => $dayStartLocal->addDay()->setToDbTimezone(),
+                        'localDay' => $dayStartLocal->toDateString(),
+                        // Empty cells seed the workDate a new entry would get: that day's exact
+                        // local midnight (in UTC). Not derived from the first entry's time-of-day,
+                        // which would drift by the DST hour across a transition and store the new
+                        // entry an hour off local midnight (it feeds upsertTime via the form key).
+                        'actualWorkDate' => $workdateOffsetStart === 0 ? $dayStartUtc : '',
+                        'hours' => 0,
+                        'description' => '',
+                    ];
+                }
+            }
+
+            // The stored workDate is the user's local midnight converted to UTC — but possibly
+            // under a different UTC offset than today (entry logged before a DST switch, or the
+            // user changed timezones). Converted to the current user timezone such an entry sits
+            // shortly before or after midnight; rounding to the nearest midnight recovers the
+            // calendar day the user actually logged, so a Monday entry can never render in the
+            // previous week's Sunday column (#3310).
+            $entryLocalTime = $currentWorkDate->setToUserTimezone();
+            $intendedDay = $entryLocalTime->hour >= 12
+                ? $entryLocalTime->addDay()->toDateString()
+                : $entryLocalTime->toDateString();
+
+            for ($i = 1; $i < 8; $i++) {
+                if ($intendedDay === $timesheetGroups[$groupKey]['day'.$i]['localDay']) {
+                    $timesheetGroups[$groupKey]['day'.$i]['hours'] += $timesheet['hours'];
+                    $timesheetGroups[$groupKey]['day'.$i]['actualWorkDate'] = $currentWorkDate;
+                    $timesheetGroups[$groupKey]['day'.$i]['description'] = $timesheet['description'];
+                    $timesheetGroups[$groupKey]['rowSum'] += $timesheet['hours'];
+
+                    break;
+                }
+            }
+        }
+
+        // The repository over-fetches by 12h on both sides of the week; drop groups whose
+        // entries all belong to an adjacent week so they don't render as empty rows.
+        return array_filter($timesheetGroups, fn (array $group) => $group['rowSum'] > 0);
+    }
+
+    /**
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::MANAGE, global: true)]
+    public function updateInvoices(array $invEmpl, array $invComp = [], array $paid = []): bool
+    {
+        // Marking entries invoiced/paid is a company-wide management action (manager+). This
+        // closes a critical IDOR: previously any caller could flip invoice/paid flags on
+        // arbitrary timesheet ids.
+        $this->authorize(TimesheetsPermissions::MANAGE);
+
+        return $this->timesheetsRepo->updateInvoices($invEmpl, $invComp, $paid);
+    }
+
+    /**
+     * @return array|string[]
+     *
+     * @api
+     */
+    public function getBookedHourTypes(): array
+    {
+        return $this->timesheetsRepo->kind;
+    }
+
+    /**
+     * @return array
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true)]
+    public function pollForNewTimesheets(?int $projectId = null): array|false
+    {
+        $timesheets = $this->timesheetsRepo->getAllAccountTimesheets($projectId);
+
+        foreach ($timesheets as $key => $timesheet) {
+            $timesheets[$key] = $this->prepareDatesForApiResponse($timesheet);
+        }
+
+        return $timesheets;
+
+    }
+
+    /**
+     * @return array
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true)]
+    public function pollForUpdatedTimesheets(?int $projectId = null): array|false
+    {
+        $timesheets = $this->timesheetsRepo->getAllAccountTimesheets($projectId);
+
+        foreach ($timesheets as $key => $timesheet) {
+            $timesheets[$key] = $this->prepareDatesForApiResponse($timesheet);
+            $timesheets[$key]['id'] = $timesheet['id'].'-'.$timesheet['modified'];
+        }
+
+        return $timesheets;
+    }
+
+    private function prepareDatesForApiResponse($timesheet)
+    {
+
+        if (dtHelper()->isValidDateString($timesheet['workDate'])) {
+            $timesheet['workDate'] = dtHelper()->parseDbDateTime($timesheet['workDate'])->toIso8601ZuluString();
+        } else {
+            $timesheet['workDate'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($timesheet['invoicedEmplDate'])) {
+            $timesheet['invoicedEmplDate'] = dtHelper()->parseDbDateTime($timesheet['invoicedEmplDate'])->toIso8601ZuluString();
+        } else {
+            $timesheet['invoicedEmplDate'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($timesheet['invoicedCompDate'])) {
+            $timesheet['invoicedCompDate'] = dtHelper()->parseDbDateTime($timesheet['invoicedCompDate'])->toIso8601ZuluString();
+        } else {
+            $timesheet['invoicedCompDate'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($timesheet['paidDate'])) {
+            $timesheet['paidDate'] = dtHelper()->parseDbDateTime($timesheet['paidDate'])->toIso8601ZuluString();
+        } else {
+            $timesheet['paidDate'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($timesheet['modified'])) {
+            $timesheet['modified'] = dtHelper()->parseDbDateTime($timesheet['modified'])->toIso8601ZuluString();
+        } else {
+            $timesheet['modified'] = null;
+        }
+
+        return $timesheet;
+
+    }
+
+    /**
+     * Returns the tickets that belong to a user, used to populate the
+     * add/edit/weekly timesheet ticket pickers.
+     *
+     * @param  int  $userId  The user whose tickets to fetch
+     * @param  int  $limit  Maximum number of tickets to return (-1 for no limit)
+     * @return array The user's tickets (empty array when none found)
+     *
+     * @throws BindingResolutionException
+     *
+     * @api
+     */
+    #[RequiresPermission(TimesheetsPermissions::VIEW, global: true, entityScoped: true)]
+    public function getUsersTickets(int $userId, int $limit = -1): array
+    {
+        // Your own ticket picker → timesheets.view; another user's tickets → timesheets.manage.
+        if (! $this->canViewTimeForUser($userId)) {
+            return [];
+        }
+
+        $tickets = $this->ticketRepo->getUsersTickets($userId, $limit);
+
+        return $tickets === false ? [] : $tickets;
+    }
+
+    /**
+     * Returns the default empty values array for a new time entry form.
+     *
+     * @return array The default form values
+     */
+    public function getDefaultTimeValues(): array
+    {
+        return [
+            'userId' => session('userdata.id'),
+            'ticket' => '',
+            'project' => '',
+            'date' => '',
+            'kind' => '',
+            'hours' => '',
+            'description' => '',
+            'invoicedEmpl' => '',
+            'invoicedComp' => '',
+            'invoicedEmplDate' => '',
+            'invoicedCompDate' => '',
+            'paid' => '',
+            'paidDate' => '',
+        ];
+    }
+
+    /**
+     * Parses raw POST data from the add-time form into a values array.
+     *
+     * Splits the pipe-delimited ticket/project field, converts the user date to
+     * UTC, and applies the manager-gated invoice/paid field assembly.
+     *
+     * @param  array  $post  The raw POST data
+     * @param  array|null  $values  Starting values (defaults applied when null)
+     * @return array The parsed values array
+     */
+    public function parseAddTimePostValues(array $post, ?array $values = null): array
+    {
+        $values ??= $this->getDefaultTimeValues();
+
+        if (isset($post['tickets']) && $post['tickets'] != '') {
+            $tempArr = explode('|', $post['tickets']);
+            $values['project'] = $tempArr[0];
+            $values['ticket'] = $tempArr[1];
+        }
+
+        if (! empty($post['kind'])) {
+            $values['kind'] = $post['kind'];
+        }
+
+        if (! empty($post['date'])) {
+            $values['date'] = (new Carbon($post['date'], session('usersettings.timezone')))->setTimezone('UTC');
+        }
+
+        if (! empty($post['hours'])) {
+            $values['hours'] = $post['hours'];
+        }
+
+        if (! empty($post['invoicedEmpl']) && $post['invoicedEmpl'] == 'on') {
+            $values['invoicedEmpl'] = 1;
+            if (! empty($post['invoicedEmplDate'])) {
+                $values['invoicedEmplDate'] = Carbon::now(session('usersettings.timezone'))->setTimezone('UTC');
+            }
+        }
+
+        if (! empty($post['invoicedComp']) && $this->can(TimesheetsPermissions::MANAGE)) {
+            if ($post['invoicedComp'] == 'on') {
+                $values['invoicedComp'] = 1;
+            }
+            if (! empty($post['invoicedCompDate'])) {
+                $values['invoicedCompDate'] = Carbon::now(session('usersettings.timezone'))->setTimezone('UTC');
+            }
+        }
+
+        if (! empty($post['paid']) && $this->can(TimesheetsPermissions::MANAGE)) {
+            if ($post['paid'] == 'on') {
+                $values['paid'] = 1;
+            }
+            if (! empty($post['paidDate'])) {
+                $values['paidDate'] = Carbon::now(session('usersettings.timezone'))->setTimezone('UTC');
+            }
+        }
+
+        if (! empty($post['description'])) {
+            $values['description'] = $post['description'];
+        }
+
+        return $values;
+    }
+
+    /**
+     * Validates the add-time values and, when valid, saves the entry.
+     *
+     * Returns a status string mirroring the controller's previous info codes
+     * (NO_TICKET / NO_KIND / NO_DATE / NO_HOURS / TIME_SAVED) so external
+     * behavior (notification keys) stays identical.
+     *
+     * @param  array  $values  The parsed time entry values
+     * @return string The status code describing the outcome
+     */
+    public function validateAndSaveTime(array $values): string
+    {
+        if ($values['ticket'] == '' || $values['project'] == '') {
+            return 'NO_TICKET';
+        }
+
+        if ($values['kind'] == '') {
+            return 'NO_KIND';
+        }
+
+        if ($values['date'] == '') {
+            return 'NO_DATE';
+        }
+
+        if ($values['hours'] == '' || $values['hours'] <= 0) {
+            return 'NO_HOURS';
+        }
+
+        $this->addTime($values);
+
+        return 'TIME_SAVED';
+    }
+
+    /**
+     * Builds a values array from a stored timesheet entry, normalizing the
+     * EMPTY_DATE sentinel to 'now' and hydrating dates into Carbon instances.
+     *
+     * @param  int  $id  The timesheet entry ID
+     * @return array|null The values array, or null if the timesheet is not found
+     */
+    public function getTimesheetForEdit(int $id): ?array
+    {
+        $timesheet = $this->getTimesheet($id);
+
+        if (! $timesheet) {
+            return null;
+        }
+
+        $timesheet['invoicedEmplDate'] = $timesheet['invoicedEmplDate'] == self::EMPTY_DATE ? 'now' : $timesheet['invoicedEmplDate'];
+        $timesheet['invoicedCompDate'] = $timesheet['invoicedCompDate'] == self::EMPTY_DATE ? 'now' : $timesheet['invoicedCompDate'];
+        $timesheet['paidDate'] = $timesheet['paidDate'] == self::EMPTY_DATE ? 'now' : $timesheet['paidDate'];
+
+        return [
+            'id' => $id,
+            'userId' => $timesheet['userId'],
+            'ticket' => $timesheet['ticketId'],
+            'project' => $timesheet['projectId'],
+            'date' => new Carbon($timesheet['workDate'], 'UTC'),
+            'kind' => $timesheet['kind'],
+            'hours' => $timesheet['hours'],
+            'description' => $timesheet['description'],
+            'invoicedEmpl' => $timesheet['invoicedEmpl'],
+            'invoicedComp' => $timesheet['invoicedComp'],
+            'invoicedEmplDate' => new Carbon($timesheet['invoicedEmplDate'], 'UTC'),
+            'invoicedCompDate' => new Carbon($timesheet['invoicedCompDate'], 'UTC'),
+            'paid' => $timesheet['paid'],
+            'paidDate' => new Carbon($timesheet['paidDate'], 'UTC'),
+        ];
+    }
+
+    /**
+     * Applies basic POST field updates from the edit-time form to a values array.
+     *
+     * @param  array  $post  The raw POST data
+     * @param  array  $values  The current values array
+     * @return array The updated values array
+     */
+    public function applyEditTimePostUpdates(array $post, array $values): array
+    {
+        if (! empty($post['tickets'])) {
+            $values['project'] = (int) $post['projects'];
+            $values['ticket'] = (int) $post['tickets'];
+        }
+
+        if (! empty($post['kind'])) {
+            $values['kind'] = $post['kind'];
+        }
+
+        if (! empty($post['date'])) {
+            $values['date'] = dtHelper()->parseUserDateTime($post['date'], 'start')->formatDateTimeForDb();
+        }
+
+        if (! empty($post['hours'])) {
+            $values['hours'] = (float) $post['hours'];
+        }
+
+        if (! empty($post['description'])) {
+            $values['description'] = $post['description'];
+        }
+
+        return $values;
+    }
+
+    /**
+     * Processes the manager-gated invoice and payment fields from the edit-time
+     * form, applying the on/off toggles and default-now date fallbacks.
+     *
+     * @param  array  $post  The raw POST data
+     * @param  array  $values  The current values array
+     * @return array The updated values array
+     */
+    public function processEditTimeInvoiceFields(array $post, array $values): array
+    {
+        if (! $this->can(TimesheetsPermissions::MANAGE)) {
+            return $values;
+        }
+
+        if (! empty($post['invoicedEmpl'])) {
+            if ($post['invoicedEmpl'] == 'on') {
+                $values['invoicedEmpl'] = 1;
+            }
+            $values['invoicedEmplDate'] = ! empty($post['invoicedEmplDate'])
+                ? dtHelper()->parseUserDateTime($post['invoicedEmplDate'], 'start')->formatDateTimeForDb()
+                : dtHelper()->userNow()->formatDateTimeForDb();
+        } else {
+            $values['invoicedEmpl'] = 0;
+            $values['invoicedEmplDate'] = '';
+        }
+
+        if (! empty($post['invoicedComp'])) {
+            if ($post['invoicedComp'] == 'on') {
+                $values['invoicedComp'] = 1;
+            }
+            $values['invoicedCompDate'] = ! empty($post['invoicedCompDate'])
+                ? dtHelper()->parseUserDateTime($post['invoicedCompDate'], 'start')->formatDateTimeForDb()
+                : dtHelper()->userNow()->formatDateTimeForDb();
+        } else {
+            $values['invoicedComp'] = 0;
+            $values['invoicedCompDate'] = '';
+        }
+
+        if (! empty($post['paid'])) {
+            if ($post['paid'] == 'on') {
+                $values['paid'] = 1;
+            }
+            if (! empty($post['paidDate'])) {
+                $values['paidDate'] = dtHelper()->parseUserDateTime($post['paidDate'], 'start')->formatDateTimeForDb();
+            } else {
+                $values['paidDate'] = dtHelper()->userNow()->formatDateTimeForDb();
+            }
+        } else {
+            $values['paid'] = 0;
+            $values['paidDate'] = '';
+        }
+
+        return $values;
+    }
+
+    /**
+     * Validates the edit-time values and, when valid, updates the entry.
+     *
+     * Returns a result describing the outcome: a notification message key and
+     * type, plus the refreshed values reloaded from the database on success.
+     * This preserves the controller's previous behavior exactly.
+     *
+     * @param  int  $id  The timesheet entry ID
+     * @param  array  $values  The parsed time entry values
+     * @return array{notification: array{message: string, type: string}|null, values: array}
+     */
+    public function validateAndUpdateTime(int $id, array $values): array
+    {
+        if ($values['ticket'] == '' || $values['project'] == '') {
+            return ['notification' => ['message' => 'notifications.time_logged_error_no_ticket', 'type' => 'error'], 'values' => $values];
+        }
+
+        if ($values['kind'] == '') {
+            return ['notification' => ['message' => 'notifications.time_logged_error_no_kind', 'type' => 'error'], 'values' => $values];
+        }
+
+        if ($values['date'] == '') {
+            return ['notification' => ['message' => 'notifications.time_logged_error_no_date', 'type' => 'error'], 'values' => $values];
+        }
+
+        if ($values['hours'] == '' || $values['hours'] <= 0) {
+            return ['notification' => ['message' => 'notifications.time_logged_error_no_hours', 'type' => 'error'], 'values' => $values];
+        }
+
+        $notification = ['message' => 'notifications.time_logged_success', 'type' => 'success'];
+
+        try {
+            $this->updateTime($values);
+        } catch (\Exception $e) {
+            Log::error($e);
+            $notification = ['message' => 'notifications.could_not_store_time', 'type' => 'error'];
+        }
+
+        $refreshed = $this->getTimesheetForEdit($id);
+        if ($refreshed !== null) {
+            $values = $refreshed;
+        }
+
+        return ['notification' => $notification, 'values' => $values];
+    }
+
+    /**
+     * Normalizes the raw showAll filter POST data into the canonical filter
+     * shape consumed by the timesheet list view, owning the strip_tags / on-off
+     * coercion and -1 defaulting.
+     *
+     * @param  array  $post  The raw POST data
+     * @return array{dateFrom: CarbonInterface, dateTo: CarbonInterface, kind: string, userId: ?int, invEmplCheck: string, invCompCheck: string, paidCheck: string, projectFilter: int|string, ticketFilter: int|string, clientId: int|string}
+     */
+    public function buildShowAllFilters(array $post): array
+    {
+        $kind = ! empty($post['kind']) ? strip_tags($post['kind']) : 'all';
+        $userId = ! empty($post['userId']) ? (int) strip_tags($post['userId']) : null;
+
+        $dateFrom = dtHelper()->userNow()->startOfWeek(CarbonInterface::MONDAY)->setToDbTimezone();
+        if (! empty($post['dateFrom'])) {
+            $dateFrom = dtHelper()->parseUserDateTime($post['dateFrom'])->setToDbTimezone();
+        }
+
+        $dateTo = dtHelper()->userNow()->endOfMonth()->setToDbTimezone();
+        if (! empty($post['dateTo'])) {
+            $dateTo = dtHelper()->parseUserDateTime($post['dateTo'])->setToDbTimezone();
+        }
+
+        $invEmplCheck = isset($post['invEmpl'])
+            ? ($post['invEmpl'] == 'all' ? '-1' : $post['invEmpl'])
+            : '-1';
+
+        $invCompCheck = '0';
+        if (isset($post['invComp'])) {
+            $invCompCheck = $post['invComp'] == 'on' ? '1' : '0';
+        }
+
+        $paidCheck = '0';
+        if (isset($post['paid'])) {
+            $paidCheck = $post['paid'] == 'on' ? '1' : '0';
+        }
+
+        $projectFilter = ! empty($post['project']) ? strip_tags($post['project']) : -1;
+        $ticketFilter = ! empty($post['ticket']) ? strip_tags($post['ticket']) : -1;
+        $clientId = ! empty($post['clientId']) ? strip_tags($post['clientId']) : -1;
+
+        return [
+            'dateFrom' => $dateFrom,
+            'dateTo' => $dateTo,
+            'kind' => $kind,
+            'userId' => $userId,
+            'invEmplCheck' => $invEmplCheck,
+            'invCompCheck' => $invCompCheck,
+            'paidCheck' => $paidCheck,
+            'projectFilter' => $projectFilter,
+            'ticketFilter' => $ticketFilter,
+            'clientId' => $clientId,
+        ];
+    }
+
+    /**
+     * Resolves the effective ticket filter for the showAll list.
+     *
+     * When a ticket filter is set, the selected ticket's project is compared to
+     * the selected project filter; a mismatch (or no project selected) collapses
+     * the ticket filter to '-1' so getAll() receives an already-resolved value.
+     *
+     * The selected ticket's project ID is passed in (null when no accessible
+     * ticket was found) to keep the permission-checked ticket lookup in the
+     * caller and avoid a circular Tickets/Timesheets service dependency.
+     *
+     * @param  int|string  $projectFilter  The selected project filter
+     * @param  int|string  $ticketFilter  The selected ticket filter
+     * @param  int|string|null  $selectedTicketProjectId  The selected ticket's project ID, or null when none
+     * @return string The resolved ticket filter
+     */
+    public function resolveShowAllTicketFilter(int|string $projectFilter, int|string $ticketFilter, int|string|null $selectedTicketProjectId): string
+    {
+        $projectMismatch = false;
+        if ($ticketFilter != '' && $ticketFilter != -1) {
+            if ($selectedTicketProjectId !== null && $selectedTicketProjectId != $projectFilter) {
+                $projectMismatch = true;
+            }
+        }
+
+        return $projectMismatch ? '-1' : ($projectFilter == -1 ? '-1' : ($ticketFilter ?: '-1'));
+    }
+
+    /**
+     * Returns the weekly timesheets for a user along with the list of ticket IDs
+     * already present in those timesheets (used to pre-select rows in the view).
+     *
+     * @param  int  $projectId  Project filter (-1 for all)
+     * @param  CarbonInterface  $fromDate  The start-of-week date
+     * @param  int  $userId  The user whose timesheets to load
+     * @return array{timesheets: array, existingTicketIds: array}
+     *
+     * @throws BindingResolutionException
+     */
+    public function getWeeklyTimesheetsWithTicketIds(int $projectId, CarbonInterface $fromDate, int $userId = 0): array
+    {
+        $timesheets = $this->getWeeklyTimesheets($projectId, $fromDate, $userId);
+        $existingTicketIds = array_map(fn ($item) => $item['ticketId'], $timesheets);
+
+        return [
+            'timesheets' => $timesheets,
+            'existingTicketIds' => $existingTicketIds,
+        ];
+    }
+
+    /**
+     * Parses a user-supplied weekly-view start date into a DB-timezone date.
+     *
+     * On parse failure the original fallback date is returned and the failure is
+     * logged with the user's timezone/date-format diagnostics, mirroring the
+     * controller's previous behavior. The boolean flag indicates whether parsing
+     * failed so the caller can surface a notification.
+     *
+     * @param  string  $startDate  The raw user-supplied start date
+     * @param  CarbonInterface  $fallback  The date to use when parsing fails
+     * @return array{date: CarbonInterface, failed: bool}
+     */
+    public function parseWeeklyStartDate(string $startDate, CarbonInterface $fallback): array
+    {
+        try {
+            return ['date' => dtHelper()->parseUserDateTime($startDate)->setToDbTimezone(), 'failed' => false];
+        } catch (\Exception $e) {
+            Log::warning($e);
+            Log::warning('User timezone: '.session('usersettings.timezone'));
+            Log::warning('User dateTime format: '.session('usersettings.date_format'));
+
+            return ['date' => $fallback, 'failed' => true];
+        }
+    }
+}

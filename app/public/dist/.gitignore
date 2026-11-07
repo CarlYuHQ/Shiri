@@ -1,0 +1,13 @@
+# 上游默认忽略整个目录（发行包里的产物由构建生成），本仓库放行自己写的那几个文件。
+*
+!.gitignore
+
+!css/
+!js/
+!img/
+css/*
+js/*
+img/*
+!css/shiri-*.css
+!js/shiri-*.js
+!img/shiri-*.svg

@@ -1,0 +1,50 @@
+<?php
+
+namespace Shiri\Domain\Tickets\Hxcontrollers;
+
+use Shiri\Core\Controller\HtmxController;
+use Shiri\Domain\Tickets\Services\Tickets;
+
+class Milestones extends HtmxController
+{
+    protected static string $view = 'tickets::partials.milestoneCard';
+
+    private Tickets $ticketService;
+
+    /**
+     * Controller constructor
+     */
+    public function init(Tickets $ticketService): void
+    {
+        $this->ticketService = $ticketService;
+    }
+
+    public function progress()
+    {
+
+        $getParams = $_GET;
+
+        $milestone = $this->ticketService->getTicket($getParams['milestoneId']);
+        $percentDone = $this->ticketService->getMilestoneProgress($getParams['milestoneId']);
+
+        $this->tpl->assign('progressColor', $getParams['progressColor'] ?? 'default');
+        $this->tpl->assign('noText', $getParams['noText'] ?? false);
+        $this->tpl->assign('milestone', $milestone);
+        $this->tpl->assign('percentDone', $percentDone);
+
+        return 'progress';
+    }
+
+    public function showCard()
+    {
+
+        $getParams = $_GET;
+
+        $milestone = $this->ticketService->getTicket($getParams['milestoneId']);
+        $percentDone = $this->ticketService->getMilestoneProgress($getParams['milestoneId']);
+
+        $this->tpl->assign('percentDone', $percentDone);
+        $this->tpl->assign('milestone', $milestone);
+
+    }
+}

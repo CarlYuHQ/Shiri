@@ -1,0 +1,178 @@
+@extends($layout)
+
+@section('content')
+
+@php
+    $canvasItem = $canvasItem ?? [];
+    $canvasTypes = $canvasTypes ?? [];
+
+    $id = '';
+    if (isset($canvasItem['id']) && $canvasItem['id'] != '') {
+        $id = $canvasItem['id'];
+    }
+@endphp
+
+<x-global::actions.modal-header icon="fa fa-lightbulb" :title="__('headline.idea')">
+    @if ($id != '')
+        <x-slot:actions>
+            <li><a href="#/ideas/delCanvasItem/{{ $id }}" class="delete"><i class="fa fa-trash-can"></i> {!! __('links.delete') !!}</a></li>
+        </x-slot:actions>
+    @endif
+</x-global::actions.modal-header>
+
+{!! $tpl->displayNotification() !!}
+
+<form class="formModal" method="post" action="{{ BASE_URL }}/ideas/ideaDialog/{{ $id }}" id="ideaItemForm">
+
+<div class="row">
+
+    <div class="col-md-8">
+
+        <input type="hidden" value="{{ $currentCanvas }}" name="canvasId"/>
+        <input type="hidden" value="{{ $tpl->escape($canvasItem['box']) }}" name="box" id="box"/>
+        <input type="hidden" value="{{ $id }}" name="itemId" id="itemId"/>
+        <input type="hidden" name="status" value="{{ $canvasItem['status'] }}" />
+        <input type="hidden" value="{{ $id }}" name="id" autocomplete="off" readonly/>
+
+        <input type="hidden" name="milestoneId" value="{{ $canvasItem['milestoneId'] }}"/>
+        <input type="hidden" name="changeItem" value="1"/>
+
+        <x-global::forms.text-input width="full" name="description" variant="headline" value="{{ $tpl->escape($canvasItem['description']) }}"
+               placeholder="{{ __('input.placeholders.short_name') }}" /><br/>
+
+        <x-global::forms.tags :value="$canvasItem['tags']" />
+
+        <textarea rows="3" cols="10" name="data" class="tiptapComplex"
+                  placeholder="">{!! $tpl->escapeMinimal($canvasItem['data']) !!}</textarea><br/>
+
+        <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.save')" id="primaryCanvasSubmitButton" />
+        <x-global::forms.button contentRole="secondary" inputType="submit" value="closeModal" id="saveAndClose">{!! __('buttons.save_and_close') !!}</x-global::forms.button>
+
+        @if ($id !== '')
+            <br/>
+            <hr>
+            <input type="hidden" name="comment" value="1"/>
+
+            <x-global::elements.section-header icon="fa fa-comments">{!! __('subtitles.discussion') !!}</x-global::elements.section-header>
+            @include('comments::submodules.generalComment', ['formUrl' => BASE_URL . '/ideas/ideaDialog/' . $id])
+        @endif
+
+    </div>
+
+    <div class="col-md-4">
+        @if ($id !== '')
+            <br/><br/>
+            <x-global::elements.section-header icon="fa fa-link">{!! __('headlines.linked_milestone') !!} <x-global::elements.info-tip :text="__('tooltip.link_milestones_tooltip')" /></x-global::elements.section-header>
+
+            <ul class="sortableTicketList" style="width:99%">
+                @if ($canvasItem['milestoneId'] == '')
+                    <li class="ui-state-default center" id="milestone_0">
+                        <h4>{!! __('headlines.no_milestone_link') !!}</h4>
+                        {!! __('text.use_milestone_to_track_idea') !!}<br/>
+                        <div class="row" id="milestoneSelectors">
+                            @if ($login::userIsAtLeast($roles::$editor))
+                                <div class="col-md-12">
+                                    <a href="javascript:void(0);"
+                                       onclick="shiri.ideasController.toggleMilestoneSelectors('new');">{!! __('links.create_link_milestone') !!}</a>
+                                    | <a href="javascript:void(0);"
+                                         onclick="shiri.ideasController.toggleMilestoneSelectors('existing');">{!! __('links.link_existing_milestone') !!}</a>
+                                </div>
+                            @endif
+                        </div>
+                        <div class="row" id="newMilestone" style="display:none;">
+                            <div class="col-md-12">
+                                <x-global::forms.textarea name="newMilestone"></x-global::forms.textarea><br/>
+                                <input type="hidden" name="type" value="milestone"/>
+                                <input type="hidden" name="leancanvasitemid" value="{{ $id }} "/>
+                                <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.save')" onclick="jQuery('#primaryCanvasSubmitButton').click()"
+                                       contentRole="primary"/>
+                                <a href="javascript:void(0);"
+                                   onclick="shiri.ideasController.toggleMilestoneSelectors('hide');">
+                                    <i class="fas fa-times"></i> {!! __('links.cancel') !!}
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="row" id="existingMilestone" style="display:none;">
+                            <div class="col-md-12">
+                                <x-global::forms.select data-placeholder="{{ __('input.placeholders.filter_by_milestone') }}"
+                                        name="existingMilestone" class="user-select">
+                                    <option value="">{!! __('text.all_milestones') !!}</option>
+                                    @foreach ($milestones as $milestoneRow)
+                                        <option value="{{ $milestoneRow->id }}"
+                                            @if (isset($searchCriteria['milestone']) && ($searchCriteria['milestone'] == $milestoneRow->id))
+                                                selected='selected'
+                                            @endif
+                                        >{{ $tpl->escape($milestoneRow->headline) }}</option>
+                                    @endforeach
+                                </x-global::forms.select>
+                                <input type="hidden" name="type" value="milestone"/>
+                                <input type="hidden" name="leancanvasitemid" value="{{ $id }} "/>
+                                <x-global::forms.button tag="input" inputType="button" :labelText="__('buttons.save')" onclick="jQuery('#primaryCanvasSubmitButton').click()"
+                                       contentRole="primary"/>
+                                <a href="javascript:void(0);"
+                                   onclick="shiri.ideasController.toggleMilestoneSelectors('hide');">
+                                    <i class="fas fa-times"></i> {!! __('links.cancel') !!}
+                                </a>
+                            </div>
+                        </div>
+                    </li>
+                @else
+                    <li class="ui-state-default" id="milestone_{{ $canvasItem['milestoneId'] }}"
+                        class="leanCanvasMilestone">
+
+                        <div hx-trigger="load"
+                             hx-indicator=".htmx-indicator"
+                             hx-get="{{ BASE_URL }}/hx/tickets/milestones/showCard?milestoneId={{ $canvasItem['milestoneId'] }}">
+                            <div class="htmx-indicator">
+                                {!! __('label.loading_milestone') !!}
+                            </div>
+                        </div>
+                        {{-- The comment form above closes this form early in the browser, so target it by id. --}}
+                        <a href="javascript:void(0);" data-post-form="ideaItemForm" data-post-field="removeMilestone" data-post-value="{{ $canvasItem['milestoneId'] }}" class="delete"><i class="fa fa-close"></i> {!! __('links.remove') !!}</a>
+
+                    </li>
+                @endif
+
+            </ul>
+
+        @endif
+    </div>
+
+</div>
+
+</form>
+
+<div class="showDialogOnLoad" >
+</div>
+
+@once
+@push('scripts')
+<script type="text/javascript">
+    window.onload = function () {
+        if (!window.jQuery) {
+            //It's not a modal
+            location.href = "{{ BASE_URL }}/ideas/showBoards?showIdeaModal={{ $canvasItem['id'] }}";
+        }
+    }
+
+    jQuery(document).ready(function(){
+
+        if (window.shiri && window.shiri.tiptapController) {
+            shiri.tiptapController.initComplexEditor();
+        }
+
+        @if (!$login::userIsAtLeast($roles::$editor))
+            shiri.authController.makeInputReadonly(".nyroModalCont");
+        @endif
+
+        @if ($login::userHasRole([$roles::$commenter]))
+        shiri.submodules.generalCommentController.enableCommenterForms();
+        @endif
+
+    })
+</script>
+@endpush
+@endonce
+
+@endsection

@@ -1,0 +1,1074 @@
+<?php
+
+namespace Shiri\Domain\Goalcanvas\Services;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Domains\BaseService;
+use Shiri\Core\Exceptions\AuthorizationException;
+use Shiri\Core\Modules\ProjectModules;
+use Shiri\Domain\Blueprints\Events\CanvasCreated;
+use Shiri\Domain\Blueprints\Events\CanvasItemCreated;
+use Shiri\Domain\Goalcanvas\Events\GoalProgressUpdated;
+use Shiri\Domain\Goalcanvas\Permissions\GoalcanvasPermissions;
+use Shiri\Domain\Goalcanvas\Repositories\Goalcanvas as GoalcanvaRepository;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+
+/**
+ * Goalcanvas (Goals / OKRs) service.
+ *
+ * Goal boards/items live in the shared zp_canvas (type "goalcanvas") / zp_canvas_items (box
+ * "goal") tables. Every by-id board/item operation routes through this service, which resolves
+ * the entity's REAL project via the repository's fail-closed resolvers (inherited from the
+ * Blueprints repo, scoped to the "goalcanvas" type) and authorizes the matching
+ * {@see GoalcanvasPermissions} verb against it. A resolver returning null (missing id, or an id
+ * whose board is a different canvas type) is treated as DENY — reads soft-deny (neutral value)
+ * so they are not a cross-project existence oracle; writes throw an AuthorizationException
+ * without writing. Never falls back to the session project for a by-id entity.
+ *
+ * @api
+ */
+class Goalcanvas extends BaseService
+{
+    /** Database canvas type for goal boards (CANVAS_NAME "goal" + "canvas"). */
+    private const CANVAS_TYPE = 'goalcanvas';
+
+    private GoalcanvaRepository $goalRepository;
+
+    private ProjectService $projectService;
+
+    /** @var array<int, int>|null Memoized accessibleProjectIds() result. */
+    private ?array $accessibleProjectIdsCache = null;
+
+    public array $reportingSettings = [
+        'linkonly',
+        'linkAndReport',
+        'nolink',
+    ];
+
+    public function __construct(
+        GoalcanvaRepository $goalRepository,
+        ProjectService $projectService,
+        private ProjectModules $projectModules,
+    ) {
+        $this->goalRepository = $goalRepository;
+        $this->projectService = $projectService;
+    }
+
+    /**
+     * Whether the Goals module is on in a project (Project settings -> Modules). Reads that span
+     * projects use this directly: MCP tools call them in-process, past the permission hook.
+     */
+    private function goalsEnabledIn(int $projectId): bool
+    {
+        return $this->projectModules->isEnabled('goalcanvas', $projectId);
+    }
+
+    /**
+     * Drop rows of projects that have the Goals module switched off.
+     *
+     * @param  array<int|string, array<string, mixed>>  $rows  Rows carrying a `projectId`.
+     * @return array<int|string, array<string, mixed>>
+     */
+    private function withoutSwitchedOffProjects(array $rows): array
+    {
+        return $this->projectModules->withoutSwitchedOffProjects('goalcanvas', $rows);
+    }
+
+    /**
+     * List the goals on a board (by board id), authorized for VIEW against the board's project.
+     * Returns [] for a missing/foreign/unauthorized board (neutral — no oracle).
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, entityScoped: true)]
+    public function getCanvasItemsById(int $id): array
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId($id, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return [];
+        }
+
+        $goals = $this->goalRepository->getCanvasItemsById($id);
+
+        if ($goals) {
+            // Attach each goal's tracked_by milestone chips (one batched read),
+            // so the board/dashboard render the edge model, not the legacy column.
+            $milestonesByGoal = $this->goalRepository->getMilestonesForGoals(
+                array_map(static fn ($g) => (int) $g['id'], $goals)
+            );
+            foreach ($goals as &$goal) {
+                $goal['milestones'] = $this->filterAccessibleMilestones($milestonesByGoal[(int) $goal['id']] ?? []);
+                $progressValue = 0;
+                $goal['goalProgress'] = 0;
+                $total = $goal['endValue'] - $goal['startValue'];
+                // Skip if start and end are the same (no range to measure).
+                if ($total == 0) {
+                    continue;
+                }
+
+                if ($goal['setting'] == 'linkAndReport') {
+                    // GetAll Child elements
+                    $currentValueSum = $this->getChildGoalsForReporting($goal['id']);
+
+                    $goal['currentValue'] = $currentValueSum;
+                    $progressValue = $currentValueSum - $goal['startValue'];
+                } else {
+                    $progressValue = $goal['currentValue'] - $goal['startValue'];
+                }
+
+                $goal['goalProgress'] = max(0, min(100, round($progressValue / $total, 2) * 100));
+            }
+        }
+
+        return $goals;
+    }
+
+    /**
+     * Sum the linked children's current values for a parent goal, authorized for VIEW against
+     * the PARENT goal's project. The cross-project roll-up of linked children is the feature;
+     * the gate is on the parent the caller asked about. Linked goals in projects with the Goals
+     * module switched off are left out. Returns 0 for a missing/foreign/unauthorized parent.
+     *
+     * @return int|mixed
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, entityScoped: true)]
+    public function getChildGoalsForReporting($parentId): mixed
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId((int) $parentId, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return 0;
+        }
+
+        // Goals come back as rows for levl1 and lvl2 being columns, so
+        // goal A | goalChildA
+        // goal A | goalChildB
+        // goal B
+        // Checks if first level is also link+report or just link
+        $goals = $this->goalRepository->getCanvasItemsByKPI($parentId);
+
+        // Linked goals can live in other projects: those with the Goals module off don't count
+        // towards the roll-up, same as they are left out of getChildrenbyKPI().
+        $this->projectModules->preload(array_merge(array_column($goals, 'projectId'), array_column($goals, 'childProjectId')));
+
+        $currentValueSum = 0;
+        $countedChildIds = [];
+        foreach ($goals as $child) {
+            if (! $this->goalsEnabledIn((int) ($child['projectId'] ?? 0))) {
+                continue;
+            }
+
+            if ($child['setting'] == 'linkAndReport') {
+                if (! $this->goalsEnabledIn((int) ($child['childProjectId'] ?? 0))) {
+                    continue;
+                }
+
+                $currentValueSum = $currentValueSum + $child['childCurrentValue'];
+
+                continue;
+            }
+
+            // A linked goal comes back once per goal linked to it in turn: count its own value once.
+            if (isset($countedChildIds[$child['id']])) {
+                continue;
+            }
+
+            $countedChildIds[$child['id']] = true;
+            $currentValueSum = $currentValueSum + $child['currentValue'];
+        }
+
+        return $currentValueSum;
+    }
+
+    /**
+     * The child-goal hierarchy for a parent goal, authorized for VIEW against the PARENT goal's
+     * project. Returns [] for a missing/foreign/unauthorized parent.
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, entityScoped: true)]
+    public function getChildrenbyKPI($parentId): array
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId((int) $parentId, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return [];
+        }
+
+        $goals = [];
+        // Goals come back as rows for levl1 and lvl2 being columns, so
+        // goal A | goalChildA
+        // goal A | goalChildB
+        // goal B
+        // Checks if first level is also link+report or just link
+        $children = $this->goalRepository->getCanvasItemsByKPI($parentId);
+
+        // Linked goals can live in other projects: leave out those with the Goals module off. A
+        // switched-off first-level goal takes its own children with it.
+        $this->projectModules->preload(array_merge(array_column($children, 'projectId'), array_column($children, 'childProjectId')));
+
+        foreach ($children as $child) {
+            if (! $this->goalsEnabledIn((int) ($child['projectId'] ?? 0))) {
+                continue;
+            }
+
+            // Added Child already? Look for child of child
+            if (! isset($goals[$child['id']])) {
+                $goals[$child['id']] = [
+                    'id' => $child['id'],
+                    'title' => $child['title'],
+                    'startValue' => $child['startValue'],
+                    'endValue' => $child['endValue'],
+                    'currentValue' => $child['currentValue'],
+                    'metricType' => $child['metricType'],
+                    'boardTitle' => $child['boardTitle'],
+                    'canvasId' => $child['canvasId'],
+                    'projectName' => $child['projectName'],
+                ];
+            }
+
+            if ($child['childId'] != '' && $this->goalsEnabledIn((int) ($child['childProjectId'] ?? 0))) {
+                if (isset($goals[$child['childId']]) === false) {
+                    $goals[$child['childId']] = [
+                        'id' => $child['childId'],
+                        'title' => $child['childTitle'],
+                        'startValue' => $child['childStartValue'],
+                        'endValue' => $child['childEndValue'],
+                        'currentValue' => $child['childCurrentValue'],
+                        'metricType' => $child['childMetricType'],
+                        'boardTitle' => $child['childBoardTitle'],
+                        'canvasId' => $child['childCanvasId'],
+                        'projectName' => $child['childProjectName'],
+                    ];
+                }
+            }
+        }
+
+        return $goals;
+    }
+
+    /**
+     * Available parent KPIs for linking, authorized for VIEW against $projectId (dispatch gate).
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, projectIdParam: 'projectId')]
+    public function getParentKPIs($projectId): array
+    {
+        if (! $this->goalsEnabledIn((int) $projectId)) {
+            return [];
+        }
+
+        $kpis = $this->withoutSwitchedOffProjects($this->goalRepository->getAllAvailableKPIs($projectId) ?: []);
+
+        $goals = [];
+
+        // Checks if first level is also link+report or just link
+        foreach ($kpis as $kpi) {
+            $goals[$kpi['id']] = [
+                'id' => $kpi['id'],
+                'description' => $kpi['description'],
+                'project' => $kpi['projectName'],
+                'board' => $kpi['boardTitle'],
+            ];
+        }
+
+        return $goals;
+    }
+
+    /**
+     * Goals linked to a milestone, authorized for VIEW against the milestone's
+     * project. Reachable beyond the milestone UI (MCP getGoalsByMilestone wraps
+     * it verbatim), so the caller's access to the milestone cannot be assumed —
+     * a missing/foreign/unauthorized milestone returns [] (neutral, no oracle).
+     *
+     * @api
+     */
+    public function getGoalsByMilestone($milestoneId): array
+    {
+        // One cast, used for BOTH the authorization resolve and the read —
+        // authorizing one value and reading another invites drift.
+        $milestoneId = (int) $milestoneId;
+
+        $projectId = $this->goalRepository->getMilestoneProjectId($milestoneId);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return [];
+        }
+
+        return $this->goalRepository->getGoalsByMilestone($milestoneId);
+    }
+
+    /**
+     * The milestone chips for a goal + a status summary, authorized for VIEW
+     * against the goal's project. Chips arrive already sorted (in-progress →
+     * not-started → done, then due date). The summary drives the one-line
+     * roll-up above the chips.
+     *
+     * @return array{milestones: array<int, array<string, mixed>>, summary: array{total: int, done: int, inProgress: int, notStarted: int}}
+     *
+     * @api
+     */
+    public function getGoalMilestones(int $goalId): array
+    {
+        $empty = ['total' => 0, 'done' => 0, 'inProgress' => 0, 'notStarted' => 0];
+
+        $projectId = $this->goalRepository->getCanvasItemProjectId($goalId, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return ['milestones' => [], 'summary' => $empty];
+        }
+
+        // Same defensive strip the rollup reads apply — keeps the editor chips
+        // consistent with getMilestonesByGoal/getGoalRollup for any legacy
+        // cross-project rows, and the summary counts what is actually shown.
+        $milestones = $this->filterAccessibleMilestones(
+            $this->goalRepository->getMilestonesForGoals([$goalId])[$goalId] ?? []
+        );
+
+        $summary = ['total' => count($milestones)] + $empty;
+        foreach ($milestones as $m) {
+            $type = $m['statusType'];
+            if ($type === 'DONE') {
+                $summary['done']++;
+            } elseif ($type === 'INPROGRESS') {
+                $summary['inProgress']++;
+            } else {
+                $summary['notStarted']++;
+            }
+        }
+
+        return ['milestones' => $milestones, 'summary' => $summary];
+    }
+
+    /**
+     * Batch sibling of getGoalMilestones(): hydrate milestone chips for many
+     * goals in a single pass, so callers with a goal set (e.g. the reports
+     * engine) avoid an N+1. Each goal is authorized for VIEW against its real
+     * project; goals the caller can't see are silently omitted. Returns a map
+     * keyed by goal id: every AUTHORIZED goal is present, mapping to an empty
+     * array when it has no milestones — so callers get a predictable key set.
+     * Only unauthorized/invisible goals are absent.
+     *
+     * @param  int[]  $goalIds
+     * @return array<int, array<int, array<string, mixed>>>
+     *
+     * @api
+     */
+    public function getMilestonesForGoals(array $goalIds): array
+    {
+        // Resolve every goal's project in ONE query (not a query per goal), then
+        // authorize per DISTINCT project with a cached VIEW check — so the
+        // auth phase stays O(1) queries regardless of goal-set size.
+        $projectByGoal = $this->goalRepository->getCanvasItemProjectIds($goalIds, self::CANVAS_TYPE);
+        if ($projectByGoal === []) {
+            return [];
+        }
+
+        $accessByProject = [];
+        $authorized = [];
+        foreach ($projectByGoal as $goalId => $projectId) {
+            if (! array_key_exists($projectId, $accessByProject)) {
+                $accessByProject[$projectId] = $this->can(GoalcanvasPermissions::VIEW, $projectId);
+            }
+            if ($accessByProject[$projectId]) {
+                $authorized[] = (int) $goalId;
+            }
+        }
+
+        if ($authorized === []) {
+            return [];
+        }
+
+        // Single hydration pass for the whole authorized set (the expensive part
+        // — status labels + progress — is batched inside the repository). Fill
+        // an empty entry for every authorized goal so an @api caller gets a
+        // predictable key set, not just the goals that happen to have chips.
+        // Each goal's chips get the same defensive cross-project strip as the
+        // single-goal reads (accessibleProjectIds is memoized, so this stays
+        // one projects lookup for the whole batch).
+        return array_replace(
+            array_fill_keys($authorized, []),
+            array_map(
+                fn (array $milestones) => $this->filterAccessibleMilestones($milestones),
+                $this->goalRepository->getMilestonesForGoals($authorized)
+            )
+        );
+    }
+
+    /**
+     * Link one milestone to a goal (append — leaves existing links intact).
+     * Authorized for EDIT against the goal's project.
+     *
+     * @throws AuthorizationException When the goal is unknown/foreign or EDIT is denied.
+     *
+     * @api
+     */
+    public function addMilestoneToGoal(int $goalId, int $milestoneId): bool
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($goalId, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $projectId);
+
+        return $this->goalRepository->addGoalMilestoneLink($goalId, $milestoneId, (int) session('userdata.id'));
+    }
+
+    /**
+     * Unlink one milestone from a goal (leaves the goal's other links intact).
+     * Authorized for EDIT against the goal's project.
+     *
+     * @throws AuthorizationException When the goal is unknown/foreign or EDIT is denied.
+     *
+     * @api
+     */
+    public function removeMilestoneFromGoal(int $goalId, int $milestoneId): bool
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($goalId, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $projectId);
+
+        return $this->goalRepository->removeGoalMilestoneLink($goalId, $milestoneId);
+    }
+
+    /**
+     * Cascade: drop every goal's link to a milestone that is being deleted.
+     * Called from the (already-authorized) milestone-delete path. Intentionally
+     * NOT @api — it skips authorization by design, so it must never be reachable
+     * as an unauthenticated JSON-RPC method.
+     */
+    public function detachMilestoneFromGoals(int $milestoneId): bool
+    {
+        return $this->goalRepository->removeMilestoneFromAllGoals($milestoneId);
+    }
+
+    /**
+     * A goal's milestones (edge model) for the mobile Progress feature —
+     * authorized for VIEW against the goal's project, and each milestone is
+     * further filtered to the caller's accessible projects as defense-in-depth
+     * (goal→milestone links are same-project only, so normally a no-op). Returns []
+     * for a missing/foreign/unauthorized goal. Dates are returned as stored
+     * (UTC). A milestone may appear under several goals — this is many-to-many.
+     *
+     * @return array<int, array<string, mixed>>
+     *
+     * @api
+     */
+    public function getMilestonesByGoal(int $goalId): array
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($goalId, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return [];
+        }
+
+        $milestones = $this->goalRepository->getMilestonesForGoals([$goalId])[$goalId] ?? [];
+
+        return $this->filterAccessibleMilestones($milestones);
+    }
+
+    /**
+     * Aggregate rollup for a goal's milestones — the payload the mobile
+     * Progress "arc" is drawn from. Authorized for VIEW against the goal's
+     * project; milestones filtered to the caller's accessible projects.
+     * Computed over the batched milestone read (no N+1). Dates returned as
+     * stored (UTC); `currentMilestoneId` is the first not-done milestone in
+     * the working order (in-progress -> not-started -> done, by due date).
+     *
+     * @return array{goalId: int, total: int, done: int, inProgress: int, notStarted: int, percentComplete: int, startDate: string|null, endDate: string|null, currentMilestoneId: int|null}
+     *
+     * @api
+     */
+    public function getGoalRollup(int $goalId): array
+    {
+        $empty = [
+            'goalId' => $goalId, 'total' => 0, 'done' => 0, 'inProgress' => 0, 'notStarted' => 0,
+            'percentComplete' => 0, 'startDate' => null, 'endDate' => null, 'currentMilestoneId' => null,
+        ];
+
+        $projectId = $this->goalRepository->getCanvasItemProjectId($goalId, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return $empty;
+        }
+
+        $milestones = $this->filterAccessibleMilestones(
+            $this->goalRepository->getMilestonesForGoals([$goalId])[$goalId] ?? []
+        );
+        if ($milestones === []) {
+            return $empty;
+        }
+
+        $done = 0;
+        $inProgress = 0;
+        $notStarted = 0;
+        $progressSum = 0;
+        $start = null;
+        $end = null;
+        $current = null;
+
+        foreach ($milestones as $m) {
+            $type = $m['statusType'] ?? 'NEW';
+            if ($type === 'DONE') {
+                $done++;
+            } elseif ($type === 'INPROGRESS') {
+                $inProgress++;
+            } else {
+                $notStarted++;
+            }
+
+            $progressSum += (int) $m['percentDone'];
+
+            $from = $this->validDate($m['editFrom'] ?? null);
+            $to = $this->validDate($m['editTo'] ?? null);
+            if ($from !== null && ($start === null || $from < $start)) {
+                $start = $from;
+            }
+            if ($to !== null && ($end === null || $to > $end)) {
+                $end = $to;
+            }
+
+            if ($current === null && $type !== 'DONE') {
+                $current = (int) $m['id'];
+            }
+        }
+
+        $total = count($milestones);
+
+        return [
+            'goalId' => $goalId,
+            'total' => $total,
+            'done' => $done,
+            'inProgress' => $inProgress,
+            'notStarted' => $notStarted,
+            'percentComplete' => (int) round($progressSum / $total),
+            'startDate' => $start,
+            'endDate' => $end,
+            'currentMilestoneId' => $current,
+        ];
+    }
+
+    /**
+     * Defensive strip: keep only milestones in projects the caller can access.
+     * Goal→milestone links are same-project only (addGoalMilestoneLink fails
+     * closed on a foreign milestone), so in normal data this is a no-op — it
+     * only guards against any legacy cross-project rows.
+     *
+     * @param  array<int, array<string, mixed>>  $milestones
+     * @return array<int, array<string, mixed>>
+     */
+    private function filterAccessibleMilestones(array $milestones): array
+    {
+        $accessible = array_flip($this->accessibleProjectIds());
+
+        return array_values(array_filter(
+            $milestones,
+            static fn ($m) => isset($accessible[(int) ($m['projectId'] ?? 0)])
+        ));
+    }
+
+    /**
+     * Project ids the current user may access. Memoized per request — the
+     * filter now runs per goal in batched reads, and the underlying projects
+     * lookup is expensive.
+     *
+     * @return array<int, int>
+     */
+    private function accessibleProjectIds(): array
+    {
+        if ($this->accessibleProjectIdsCache !== null) {
+            return $this->accessibleProjectIdsCache;
+        }
+
+        $projects = $this->projectService->getProjectsUserHasAccessTo();
+
+        if (! is_array($projects)) {
+            return $this->accessibleProjectIdsCache = [];
+        }
+
+        return $this->accessibleProjectIdsCache = array_values(array_filter(
+            array_map(static fn ($p) => (int) ($p['id'] ?? 0), $projects),
+            static fn ($id) => $id > 0
+        ));
+    }
+
+    /**
+     * Return a stored datetime if it's a real value, else null (filters the
+     * '0000-00-00 00:00:00' / empty sentinels milestones can carry).
+     */
+    private function validDate(mixed $value): ?string
+    {
+        $s = trim((string) $value);
+        if ($s === '' || str_starts_with($s, '0000-00-00')) {
+            return null;
+        }
+
+        return $s;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Secured by-id board/item CRUD chokepoint (controllers call these instead of the repo).
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Fetch a single goal item by id, authorized for VIEW against the item's real project.
+     *
+     * @return array<string, mixed>|false False when missing/foreign/unauthorized.
+     */
+    public function getGoalItem(int $id): array|false
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($id, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return false;
+        }
+
+        $item = $this->goalRepository->getSingleCanvasItem($id);
+        if (is_array($item)) {
+            // Surface the item's REAL (authorized) project so callers scope
+            // project-dependent UI to the goal's project, not the session's —
+            // the dialog can be opened for a goal outside the current project.
+            $item['projectId'] = $projectId;
+        }
+
+        return $item;
+    }
+
+    /**
+     * Fetch a single goal board by id, authorized for VIEW against the board's real project.
+     *
+     * @return array<string, mixed>|false False when missing/foreign/unauthorized.
+     *
+     * @api
+     */
+    public function getSingleCanvas($id)
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId((int) $id, self::CANVAS_TYPE);
+        if ($projectId === null || ! $this->can(GoalcanvasPermissions::VIEW, $projectId)) {
+            return false;
+        }
+
+        return $this->goalRepository->getSingleCanvas((int) $id);
+    }
+
+    /**
+     * Create a goal board, authorized for CREATE against the target project.
+     *
+     * @throws AuthorizationException When projectId is missing or CREATE is denied.
+     *
+     * @api
+     */
+    public function createGoalboard($values)
+    {
+        $projectId = (int) ($values['projectId'] ?? 0);
+        if ($projectId === 0) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::CREATE, $projectId);
+
+        // Reachable over JSON-RPC: the author is the authenticated user, never a caller-supplied id.
+        $values['author'] = (int) session('userdata.id');
+
+        $newId = $this->goalRepository->addCanvas($values);
+
+        if ($newId !== false && (int) $newId > 0) {
+            CanvasCreated::dispatch(canvasId: (int) $newId, type: self::CANVAS_TYPE, projectId: $projectId);
+        }
+
+        return $newId;
+    }
+
+    /**
+     * Rename a goal board, authorized for EDIT against the board's real project.
+     *
+     * @throws AuthorizationException When the board is unknown/foreign or EDIT is denied.
+     *
+     * @api
+     */
+    public function updateGoalboard($values)
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId((int) ($values['id'] ?? 0), self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $projectId);
+
+        return $this->goalRepository->updateCanvas($values);
+    }
+
+    /**
+     * Copy a goal board into a target project. Requires VIEW on the source board's project and
+     * CREATE in the target project.
+     *
+     * @throws AuthorizationException When the source is unknown/foreign, or VIEW/CREATE is denied.
+     */
+    public function copyGoalBoard(int $sourceCanvasId, int $targetProjectId, int $authorId, string $title): int
+    {
+        $sourceProjectId = $this->goalRepository->getCanvasProjectId($sourceCanvasId, self::CANVAS_TYPE);
+        if ($sourceProjectId === null || $targetProjectId <= 0) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::VIEW, $sourceProjectId);
+        $this->authorize(GoalcanvasPermissions::CREATE, $targetProjectId);
+
+        $newCanvasId = $this->goalRepository->copyCanvas($targetProjectId, $sourceCanvasId, $authorId, $title);
+
+        if ($newCanvasId > 0) {
+            CanvasCreated::dispatch(canvasId: $newCanvasId, type: self::CANVAS_TYPE, projectId: $targetProjectId);
+        }
+
+        return $newCanvasId;
+    }
+
+    /**
+     * Merge a source goal board's items into a target board. Requires EDIT on the target board's
+     * project and VIEW on the source board's project — both resolved by id.
+     *
+     * @throws AuthorizationException When either board is unknown/foreign, or EDIT/VIEW is denied.
+     */
+    public function mergeGoalBoard(int $targetCanvasId, int $sourceCanvasId): bool
+    {
+        $targetProjectId = $this->goalRepository->getCanvasProjectId($targetCanvasId, self::CANVAS_TYPE);
+        $sourceProjectId = $this->goalRepository->getCanvasProjectId($sourceCanvasId, self::CANVAS_TYPE);
+        if ($targetProjectId === null || $sourceProjectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $targetProjectId);
+        $this->authorize(GoalcanvasPermissions::VIEW, $sourceProjectId);
+
+        return $this->goalRepository->mergeCanvas($targetCanvasId, $sourceCanvasId);
+    }
+
+    /**
+     * Delete a goal board (and its items), authorized for DELETE against the board's real project.
+     *
+     * @throws AuthorizationException When the board is unknown/foreign or DELETE is denied.
+     */
+    public function deleteGoalBoard(int $canvasId): void
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId($canvasId, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::DELETE, $projectId);
+
+        $this->goalRepository->deleteCanvas($canvasId);
+    }
+
+    /**
+     * Create a goal item, authorized for CREATE against the target board's real project.
+     *
+     * @param  array<string, mixed>  $values  Item values (must include `canvasId`)
+     * @return false|string New item id, or false on insert failure
+     *
+     * @throws AuthorizationException When the target board is unknown/foreign or CREATE is denied.
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::CREATE, entityScoped: true)]
+    public function createGoal($values)
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId((int) ($values['canvasId'] ?? 0), self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::CREATE, $projectId);
+
+        $newId = $this->goalRepository->createGoal($values);
+
+        if ($newId !== false && (int) $newId > 0) {
+            CanvasItemCreated::dispatch(canvasItemId: (int) $newId, type: self::CANVAS_TYPE, projectId: $projectId);
+        }
+
+        if ($newId !== false && array_key_exists('milestoneId', $values)) {
+            $this->syncGoalMilestoneEdges((int) $newId, $values['milestoneId'], (int) session('userdata.id'));
+        }
+
+        return $newId;
+    }
+
+    /**
+     * Create a goal item (controller add-item path), authorized for CREATE against the target
+     * board's real project.
+     *
+     * @param  array<string, mixed>  $values  Item values (must include `canvasId`)
+     * @return false|string New item id, or false on insert failure
+     *
+     * @throws AuthorizationException When the target board is unknown/foreign or CREATE is denied.
+     */
+    public function createGoalItem(array $values): false|string
+    {
+        $projectId = $this->goalRepository->getCanvasProjectId((int) ($values['canvasId'] ?? 0), self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::CREATE, $projectId);
+
+        $newId = $this->goalRepository->addCanvasItem($values);
+
+        if ($newId !== false && (int) $newId > 0) {
+            CanvasItemCreated::dispatch(canvasItemId: (int) $newId, type: self::CANVAS_TYPE, projectId: $projectId);
+        }
+
+        // Only reconcile edges when a real milestone id is supplied. A brand-new
+        // item has no edges to clear, so an empty milestoneId — controllers post
+        // '' for every box via a hidden input — would just cost a wasted lookup.
+        // The update/patch paths still process empty values there, where clearing
+        // an existing link is a meaningful edit.
+        $milestoneIdValue = $values['milestoneId'] ?? null;
+        if ($newId !== false
+            && is_scalar($milestoneIdValue)
+            && filter_var($milestoneIdValue, FILTER_VALIDATE_INT) > 0
+        ) {
+            $this->syncGoalMilestoneEdges((int) $newId, $milestoneIdValue, (int) session('userdata.id'));
+        }
+
+        return $newId;
+    }
+
+    /**
+     * Update a goal item, authorized for EDIT against the item's real project. The project is
+     * resolved from the existing item's id, so the payload's canvasId cannot relocate it.
+     *
+     * @param  array<string, mixed>  $values  Item values (must include `itemId` or `id`)
+     *
+     * The id is validated strictly (an array such as `itemId[]=N` is rejected rather than cast)
+     * and the SAME authorized id is written back into the payload, so the row that is written is
+     * always the row that was authorized.
+     *
+     * @throws AuthorizationException When the item id is invalid, the item is unknown/foreign or EDIT is denied.
+     */
+    public function updateGoalItem(array $values): void
+    {
+        $rawItemId = $values['itemId'] ?? $values['id'] ?? null;
+        $itemId = is_int($rawItemId) || is_string($rawItemId) ? filter_var($rawItemId, FILTER_VALIDATE_INT) : false;
+        if ($itemId === false || $itemId <= 0) {
+            throw new AuthorizationException;
+        }
+
+        $projectId = $this->goalRepository->getCanvasItemProjectId($itemId, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $projectId);
+
+        // Write exactly the id that was authorized.
+        $values['itemId'] = $itemId;
+        $values['id'] = $itemId;
+
+        $goalBefore = array_key_exists('currentValue', $values) ? $this->goalRepository->getSingleCanvasItem($itemId) : null;
+
+        $this->goalRepository->editCanvasItem($values);
+
+        if (is_array($goalBefore)) {
+            $this->dispatchGoalProgressOnChange($itemId, $projectId, $goalBefore, $values);
+        }
+
+        if (array_key_exists('milestoneId', $values)) {
+            $this->syncGoalMilestoneEdges($itemId, $values['milestoneId'], (int) session('userdata.id'));
+        }
+    }
+
+    /**
+     * Reconcile a goal's tracked_by milestone edges against the desired set.
+     * Accepts a single milestone id (scalar — the transitional single-select
+     * write) OR an array (multi-select). Set-based, so an unchanged save
+     * doesn't churn edges and an empty value/array clears all links.
+     *
+     * @param  mixed  $milestoneIdValue  int|string|array<int|string> milestone id(s), or '' to clear
+     */
+    private function syncGoalMilestoneEdges(int $goalId, mixed $milestoneIdValue, int $userId): void
+    {
+        if ($goalId <= 0) {
+            return;
+        }
+
+        $desired = [];
+        foreach (is_array($milestoneIdValue) ? $milestoneIdValue : [$milestoneIdValue] as $value) {
+            // Strict int validation — (int) would coerce '42abc' to 42 and could
+            // silently link the wrong milestone if a malformed value reaches this
+            // path (e.g. via JSON-RPC). Non-scalar / non-int values are dropped.
+            $milestoneId = is_scalar($value) ? filter_var($value, FILTER_VALIDATE_INT) : false;
+            if ($milestoneId !== false && $milestoneId > 0) {
+                $desired[] = $milestoneId;
+            }
+        }
+        $desired = array_values(array_unique($desired));
+
+        $current = $this->goalRepository->getMilestoneIdsForGoal($goalId);
+
+        foreach (array_diff($current, $desired) as $remove) {
+            $this->goalRepository->removeGoalMilestoneLink($goalId, (int) $remove);
+        }
+        foreach (array_diff($desired, $current) as $add) {
+            $this->goalRepository->addGoalMilestoneLink($goalId, (int) $add, $userId);
+        }
+    }
+
+    /**
+     * Patch allowlisted columns of a goal item, authorized for EDIT against the item's real
+     * project.
+     *
+     * @param  int  $id  Goal item id
+     * @param  array<string, mixed>  $params  Fields to patch (allowlisted in the repository)
+     * @return bool False when no allowlisted columns were present
+     *
+     * @throws AuthorizationException When the item is unknown/foreign or EDIT is denied.
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::EDIT, entityScoped: true)]
+    public function patchGoalItem(int $id, array $params): bool
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($id, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::EDIT, $projectId);
+
+        $goalBefore = array_key_exists('currentValue', $params) ? $this->goalRepository->getSingleCanvasItem($id) : null;
+
+        $result = $this->goalRepository->patchCanvasItem($id, $params);
+
+        if ($result && is_array($goalBefore)) {
+            $this->dispatchGoalProgressOnChange($id, $projectId, $goalBefore, $params);
+        }
+
+        // Only mirror the milestoneId change into the tracked_by edges when the
+        // column patch actually persisted — otherwise the edges would drift from
+        // the milestoneId column and break the dual-write invariant.
+        if ($result && array_key_exists('milestoneId', $params)) {
+            $this->syncGoalMilestoneEdges($id, $params['milestoneId'], (int) session('userdata.id'));
+        }
+
+        return $result;
+    }
+
+    /**
+     * Fire {@see GoalProgressUpdated} when a write changed a goal's current value.
+     *
+     * The target counts as reached at >= endValue, or at <= endValue for a decreasing goal (one
+     * whose endValue is below its startValue); `targetReached` is true only when this write
+     * crossed into that state.
+     *
+     * @param  int  $goalId  The goal item id.
+     * @param  int  $projectId  The goal's project.
+     * @param  array<string, mixed>  $goalBefore  The stored goal read before the write.
+     * @param  array<string, mixed>  $written  The fields written (must contain currentValue).
+     */
+    private function dispatchGoalProgressOnChange(int $goalId, int $projectId, array $goalBefore, array $written): void
+    {
+        $toFloat = static fn (mixed $value): ?float => is_numeric($value) ? (float) $value : null;
+
+        $previousValue = $toFloat($goalBefore['currentValue'] ?? null);
+        $currentValue = $toFloat($written['currentValue'] ?? null);
+
+        if ($previousValue === $currentValue) {
+            return;
+        }
+
+        $startValue = $toFloat(array_key_exists('startValue', $written) ? $written['startValue'] : ($goalBefore['startValue'] ?? null));
+        $endValue = $toFloat(array_key_exists('endValue', $written) ? $written['endValue'] : ($goalBefore['endValue'] ?? null));
+
+        $isDecreasing = $startValue !== null && $endValue !== null && $endValue < $startValue;
+        $hasReached = static function (?float $value) use ($endValue, $isDecreasing): bool {
+            if ($value === null || $endValue === null) {
+                return false;
+            }
+
+            return $isDecreasing ? $value <= $endValue : $value >= $endValue;
+        };
+
+        GoalProgressUpdated::dispatch(
+            goalId: $goalId,
+            projectId: $projectId,
+            previousValue: $previousValue,
+            currentValue: $currentValue,
+            endValue: $endValue,
+            targetReached: $hasReached($currentValue) && ! $hasReached($previousValue),
+        );
+    }
+
+    /**
+     * Delete a goal item, authorized for DELETE against the item's real project.
+     *
+     * @throws AuthorizationException When the item is unknown/foreign or DELETE is denied.
+     */
+    public function deleteGoalItem(int $id): void
+    {
+        $projectId = $this->goalRepository->getCanvasItemProjectId($id, self::CANVAS_TYPE);
+        if ($projectId === null) {
+            throw new AuthorizationException;
+        }
+        $this->authorize(GoalcanvasPermissions::DELETE, $projectId);
+
+        $this->goalRepository->delCanvasItem($id);
+        $this->goalRepository->removeAllGoalMilestoneLinks($id);
+    }
+
+    /**
+     * Poll all goals the user can access (optionally scoped to a project/board). The repository
+     * query already filters to the user's accessible projects; the dispatch gate adds the
+     * capability check.
+     *
+     * @return array
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, projectIdParam: 'projectId')]
+    public function pollGoals(?int $projectId = null, ?int $board = null)
+    {
+        $goals = $this->withoutSwitchedOffProjects($this->goalRepository->getAllAccountGoals($projectId, $board) ?: []);
+
+        foreach ($goals as $key => $goal) {
+            $goals[$key] = $this->prepareDatesForApiResponse($goal);
+        }
+
+        return $goals;
+    }
+
+    /**
+     * @return array
+     *
+     * @api
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, projectIdParam: 'projectId')]
+    public function pollForUpdatedGoals(?int $projectId = null, ?int $board = null): array|false
+    {
+        $goals = $this->withoutSwitchedOffProjects($this->goalRepository->getAllAccountGoals($projectId, $board) ?: []);
+
+        foreach ($goals as $key => $goal) {
+            $goals[$key] = $this->prepareDatesForApiResponse($goal);
+            $goals[$key]['id'] = $goal['id'].'-'.$goal['modified'];
+        }
+
+        return $goals;
+    }
+
+    private function prepareDatesForApiResponse($goal)
+    {
+        if (dtHelper()->isValidDateString($goal['created'])) {
+            $goal['created'] = dtHelper()->parseDbDateTime($goal['created'])->toIso8601ZuluString();
+        } else {
+            $goal['created'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($goal['modified'])) {
+            $goal['modified'] = dtHelper()->parseDbDateTime($goal['modified'])->toIso8601ZuluString();
+        } else {
+            $goal['modified'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($goal['startDate'])) {
+            $goal['startDate'] = dtHelper()->parseDbDateTime($goal['startDate'])->toIso8601ZuluString();
+        } else {
+            $goal['startDate'] = null;
+        }
+
+        if (dtHelper()->isValidDateString($goal['endDate'])) {
+            $goal['endDate'] = dtHelper()->parseDbDateTime($goal['endDate'])->toIso8601ZuluString();
+        } else {
+            $goal['endDate'] = null;
+        }
+
+        return $goal;
+    }
+}

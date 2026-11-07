@@ -1,0 +1,89 @@
+<?php
+
+namespace Shiri\Domain\Tickets\Tools;
+
+use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Mcp\Request;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\Server\Tool;
+use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
+use Shiri\Domain\Tickets\Services\Tickets;
+
+/**
+ * Search for milestones in a project.
+ */
+#[IsReadOnly]
+class FindMilestonesTool extends Tool
+{
+    public function __construct(
+        private Tickets $ticketsService,
+    ) {}
+
+    /**
+     * Get the tool name.
+     */
+    public function name(): string
+    {
+        return 'findMilestones';
+    }
+
+    /**
+     * Get the tool's display title.
+     */
+    public function title(): string
+    {
+        return 'Find Milestones';
+    }
+
+    /**
+     * Get the tool description.
+     */
+    public function description(): string
+    {
+        return 'Gets all milestones from the database given search criteria array. All dates are returned in the format YYYY-MM-DD hh:mm:ss in the UTC timezone';
+    }
+
+    /**
+     * Define the tool input schema.
+     *
+     * @return array<string, \Illuminate\JsonSchema\Types\Type>
+     */
+    public function schema(JsonSchema $schema): array
+    {
+        return [
+            'projectId' => $schema->integer()
+                ->description('Project ID of the milestones to retrieve.')
+                ->required(),
+        ];
+    }
+
+    /**
+     * Handle the tool request.
+     */
+    public function handle(Request $request): Response
+    {
+        $arguments = $request->all();
+
+        $projectId = (int) ($arguments['projectId'] ?? 0);
+        $milestones = $this->ticketsService->getAllMilestones(['currentProject' => $projectId, 'type' => 'milestone']);
+
+        $results = "## MILESTONES \n";
+
+        if (empty($milestones)) {
+            $results .= 'No Milestones found for this project.';
+
+            return Response::text($results);
+        }
+
+        foreach ($milestones as $milestone) {
+            $progress = $this->ticketsService->getMilestoneProgress($milestone->id);
+            $results .= 'Title: '.$milestone->headline."\n";
+            $results .= 'Start Date: '.$milestone->editFrom."\n";
+            $results .= 'End Date: '.$milestone->editTo."\n";
+            $results .= 'Color: '.$milestone->tags."\n";
+            $results .= 'Progress: '.$progress."% completed\n";
+        }
+
+        return Response::text($results);
+    }
+}

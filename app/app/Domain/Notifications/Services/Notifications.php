@@ -1,0 +1,435 @@
+<?php
+
+namespace Shiri\Domain\Notifications\Services;
+
+use DOMDocument;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Shiri\Core\Http\TrustedAppUrl;
+use Shiri\Core\Language as LanguageCore;
+use Shiri\Core\Mailer as MailerCore;
+use Shiri\Core\Support\NameSanitizer;
+use Shiri\Domain\Notifications\Events\PushDeviceRegistered;
+use Shiri\Domain\Notifications\Events\UserMentioned;
+use Shiri\Domain\Notifications\Repositories\Notifications as NotificationRepository;
+use Shiri\Domain\Users\Repositories\Users as UserRepository;
+
+/**
+ * @api
+ */
+class Notifications
+{
+    private NotificationRepository $notificationsRepo;
+
+    private UserRepository $userRepository;
+
+    private LanguageCore $language;
+
+    /**
+     * __construct - get database connection
+     *
+     *
+     * @api
+     */
+    public function __construct(
+        NotificationRepository $notificationsRepo,
+        UserRepository $userRepository,
+        LanguageCore $language
+    ) {
+        $this->notificationsRepo = $notificationsRepo;
+        $this->userRepository = $userRepository;
+        $this->language = $language;
+    }
+
+    /**
+     * Not exposed via JSON-RPC: it accepts an arbitrary $userId.
+     */
+    public function getAllNotifications($userId, bool $showNewOnly = false, int $limitStart = 0, int $limitEnd = 100, array $filterOptions = []): false|array
+    {
+
+        return $this->notificationsRepo->getAllNotifications($userId, $showNewOnly, $limitStart, $limitEnd, $filterOptions);
+    }
+
+    /**
+     * @internal Not exposed over JSON-RPC: it writes into ANY user's inbox (the target user
+     *           id is part of each notification row), so a remote caller could forge messages.
+     *           Called by listeners, services and plugins only.
+     */
+    public function addNotifications(array $notifications): ?bool
+    {
+
+        return $this->notificationsRepo->addNotifications($notifications);
+    }
+
+    /**
+     * consumeFlashNotification - reads the pending growl/flash notification from the
+     * session, clears the relevant session keys (read-once semantics) and returns the
+     * assembled payload.
+     *
+     * Returns null when there is no pending notification.
+     *
+     * @return array{notification: string, type: string, eventId: string}|null
+     *
+     * @api
+     */
+    public function consumeFlashNotification(): ?array
+    {
+        if (session('notification') == '') {
+            return null;
+        }
+
+        $notificationArray = [
+            'notification' => session('notification'),
+            'type' => session('notificationType') ?? '',
+            'eventId' => session('eventId') ?? '',
+        ];
+
+        session(['notification' => '']);
+        session(['notificationType' => '']);
+        session(['eventId' => '']);
+
+        return $notificationArray;
+    }
+
+    /**
+     * Marks a notification (or 'all') read for the CURRENT (session) user.
+     *
+     * JSON-RPC entry point: derives the user from the session so a caller
+     * cannot mark another user's notifications read.
+     *
+     * @param  int|string  $id  A notification id, or 'all'
+     * @return bool True on success
+     *
+     * @api
+     */
+    public function markRead($id): bool
+    {
+        return $this->markNotificationRead($id, session('userdata.id'));
+    }
+
+    /**
+     * Not exposed via JSON-RPC (accepts an arbitrary $userId). Use markRead().
+     */
+    public function markNotificationRead($id, $userId): bool
+    {
+        if ($id == 'all') {
+            return $this->notificationsRepo->markAllNotificationRead($userId);
+        }
+
+        // Scope the update by user so a caller cannot mark another user's notification read.
+        return $this->notificationsRepo->markNotificationRead($id, $userId);
+    }
+
+    /**
+     * Flip a previously-read notification back to unread for the authenticated
+     * (session) user. Powers the swipe-to-mark-unread inbox gesture on mobile —
+     * symmetric to markRead() so users can re-surface something they tapped open
+     * by accident.
+     *
+     * Session-scoped: the row is matched on (id, session user), so a caller
+     * cannot flip another user's notification unread by guessing its id. (The
+     * id is a global sequence, so an unscoped update would be an IDOR.)
+     *
+     * @param  int  $id  The notification id to mark unread
+     * @return bool True on success
+     *
+     * @api
+     */
+    public function markNotificationUnread(int $id): bool
+    {
+        $userId = (int) session('userdata.id');
+        if ($id <= 0 || $userId === 0) {
+            return false;
+        }
+
+        return $this->notificationsRepo->markNotificationUnread($id, $userId);
+    }
+
+    /**
+     * Unread notification count for the authenticated user. Mobile uses
+     * this for the app-icon badge and the inbox tab unread dot. Cheap
+     * because the (userId, read) composite index on zp_notifications
+     * makes it a fast count.
+     *
+     * @api
+     */
+    public function getUnreadCount(): int
+    {
+        $userId = (int) session('userdata.id');
+        if ($userId === 0) {
+            return 0;
+        }
+
+        // Delegated to the Repository — Service stores the raw DbCore
+        // (no query-builder helpers), Repository stores the resolved
+        // Illuminate ConnectionInterface. Following the established
+        // pattern that all SQL lives in the Repository layer.
+        return $this->notificationsRepo->getUnreadCount($userId);
+    }
+
+    /**
+     * Inbox listing for the authenticated (session) user. Mobile's inbox tab
+     * calls this with {} and gets only its own notifications (newest first).
+     *
+     * Session-scoped on purpose: getAllNotifications() takes an arbitrary
+     * $userId and is deliberately NOT @api-exposed (it would let a caller read
+     * another user's inbox). This wrapper derives the user from the session,
+     * exactly like getUnreadCount()/markRead() do, so there is nothing to gate.
+     *
+     * (Mark-all-read is already covered by markRead('all').)
+     *
+     * Pagination is clamped and the repo's arbitrary column=>value filter
+     * passthrough is intentionally NOT exposed here — an @api caller gets a
+     * bounded page of its OWN rows only (no caller-supplied WHERE columns, no
+     * unbounded limit).
+     *
+     * @param  int  $showNewOnly  1 = only unread notifications, 0 = all
+     * @param  int  $limitStart  Offset for paging (clamped to >= 0)
+     * @param  int  $limitEnd  Page size (clamped to 1..100)
+     * @return array<int, array<string, mixed>> The session user's notifications, or [] when unauthenticated
+     *
+     * @api
+     */
+    public function getInbox(int $showNewOnly = 0, int $limitStart = 0, int $limitEnd = 50): array
+    {
+        $userId = (int) session('userdata.id');
+        if ($userId === 0) {
+            return [];
+        }
+
+        // Clamp pagination so an @api caller cannot request an unbounded page.
+        $limitStart = max(0, $limitStart);
+        $limitEnd = min(max(1, $limitEnd), 100);
+
+        return $this->notificationsRepo->getAllNotifications($userId, (bool) $showNewOnly, $limitStart, $limitEnd) ?: [];
+    }
+
+    /**
+     * Register a mobile device's push token for the authenticated user.
+     * Mobile calls this on every login (idempotent). The push fields
+     * live directly on the bearer's zp_access_tokens row, so:
+     *   - logout / token revoke deletes the push registration too
+     *     (no orphan rows, no prune cron needed)
+     *   - re-login auto-creates a fresh row that will be updated on the
+     *     next registerPushToken call
+     *
+     * Per [[feedback-mobile-owns-explicit-rpc-params]] convention,
+     * userId is resolved server-side from session — we don't accept it
+     * from the client (a stolen bearer shouldn't be able to register
+     * push tokens on someone else's account).
+     *
+     * Provider:
+     *   - 'fcm': raw Firebase Cloud Messaging registration token.
+     *            Dispatched direct to FCM HTTP v1.
+     *
+     * No token-format validation. Bad tokens are caught at send-time
+     * by FCM (UNREGISTERED / INVALID_ARGUMENT) and we mark
+     * push_invalidated_at then. Pre-validating here would just shift a
+     * small class of failures earlier without saving any work.
+     *
+     * The push_provider column on zp_access_tokens is retained for
+     * forward compatibility, but only 'fcm' is accepted today.
+     *
+     * @param  string  $token  FCM registration token
+     * @param  string  $platform  'ios' or 'android'
+     * @param  string|null  $deviceName  Ignored — kept for backwards-
+     *                                   compat with mobile clients that
+     *                                   still send it; the device name
+     *                                   lives on zp_access_tokens.name
+     *                                   already (set at login time)
+     * @param  string  $provider  Must be 'fcm' (default 'fcm')
+     *
+     * @api
+     */
+    public function registerPushToken(string $token, string $platform, ?string $deviceName = null, string $provider = 'fcm'): bool
+    {
+        $userId = (int) session('userdata.id');
+        if ($userId === 0) {
+            return false;
+        }
+
+        if (! in_array($platform, ['ios', 'android'], true)) {
+            return false;
+        }
+        if ($provider !== 'fcm') {
+            return false;
+        }
+        if ($token === '') {
+            return false;
+        }
+
+        $accessTokenId = $this->resolveCurrentAccessTokenId($userId);
+        if ($accessTokenId === null) {
+            return false;
+        }
+
+        $registered = \Illuminate\Support\Facades\DB::table('zp_access_tokens')
+            ->where('id', $accessTokenId)
+            ->update([
+                'push_token' => $token,
+                'push_platform' => $platform,
+                'push_provider' => $provider,
+                'push_token_updated_at' => now(),
+                'push_invalidated_at' => null,
+            ]) > 0;
+
+        if ($registered) {
+            PushDeviceRegistered::dispatch(userId: $userId, platform: $platform);
+        }
+
+        return $registered;
+    }
+
+    /**
+     * Unregister this device's push token (called on mobile logout
+     * BEFORE the bearer is cleared, so the access token row is still
+     * resolvable). Soft-delete via push_invalidated_at — preserves the
+     * access-token row itself for the rest of the logout sequence.
+     *
+     * @param  string  $token  The push token being unregistered. Kept
+     *                         for backwards-compat with mobile clients
+     *                         that pass it; we only need the bearer to
+     *                         identify the row, but a mismatch between
+     *                         passed-in token and stored token signals
+     *                         a race we should ignore (return true
+     *                         either way so logout doesn't fail).
+     *
+     * @api
+     */
+    public function unregisterPushToken(string $token): bool
+    {
+        $userId = (int) session('userdata.id');
+        if ($userId === 0) {
+            return false;
+        }
+
+        $accessTokenId = $this->resolveCurrentAccessTokenId($userId);
+        if ($accessTokenId === null) {
+            return false;
+        }
+
+        \Illuminate\Support\Facades\DB::table('zp_access_tokens')
+            ->where('id', $accessTokenId)
+            ->update(['push_invalidated_at' => now()]);
+
+        return true;
+    }
+
+    /**
+     * Resolve the zp_access_tokens.id for the bearer that authenticated
+     * the current request. Tries Sanctum's currentAccessToken() first;
+     * falls back to the most-recently-used row for the user when the
+     * Sanctum guard isn't bound (legacy session-only auth path).
+     *
+     * Returns null only when no rows exist for the user — at that point
+     * the caller can't register push without a row to attach it to.
+     */
+    private function resolveCurrentAccessTokenId(int $userId): ?int
+    {
+        try {
+            $user = auth()->user();
+            if ($user !== null && method_exists($user, 'currentAccessToken')) {
+                $current = $user->currentAccessToken();
+                if ($current !== null && isset($current->id)) {
+                    return (int) $current->id;
+                }
+            }
+        } catch (\Throwable $e) {
+            // Sanctum guard not bound or user model doesn't support
+            // currentAccessToken — fall through to the lookup below.
+        }
+
+        $row = \Illuminate\Support\Facades\DB::table('zp_access_tokens')
+            ->where('tokenable_id', $userId)
+            ->orderByDesc('last_used_at')
+            ->orderByDesc('id')
+            ->first();
+
+        return $row !== null ? (int) $row->id : null;
+    }
+
+    /**
+     * @internal Not exposed over JSON-RPC: the author id, target users (data-tagged-user-id in
+     *           $content) and URL are all caller-supplied, so an RPC caller could forge mention
+     *           notifications and emails to any user. Called by the comment/status-update flows only.
+     *
+     * @param  string  $content  The HTML that may contain mention links.
+     * @param  string  $module  The module of the mentioning entity.
+     * @param  int  $moduleId  The id of the mentioning entity.
+     * @param  int  $authorId  The user who wrote the mention.
+     * @param  string  $url  The app URL of the entity (emailed).
+     * @param  int|null  $projectId  The entity's project, reported on {@see UserMentioned}.
+     *
+     * @throws BindingResolutionException
+     */
+    public function processMentions(string $content, string $module, int $moduleId, int $authorId, string $url, ?int $projectId = null): void
+    {
+        // The url is emailed: point it at the trusted app URL, not the request host.
+        $url = app()->make(TrustedAppUrl::class)->rebase($url);
+
+        $dom = new DOMDocument;
+
+        // Content may not be well formatted. Suppress warnings.
+        @$dom->loadHTML($content);
+        $links = $dom->getElementsByTagName('a');
+
+        $author = $this->userRepository->getUser($authorId);
+        if ($author === false) {
+            return;
+        }
+
+        $authorName = htmlspecialchars(NameSanitizer::clean($author['firstname'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        for ($i = 0; $i < $links->count(); $i++) {
+            $taggedUser = $links->item($i)->getAttribute('data-tagged-user-id');
+
+            if ($taggedUser !== '' && is_numeric($taggedUser)) {
+                // Check if user was mentioned before
+                $userMentions = $this->getAllNotifications(
+                    $taggedUser,
+                    false,
+                    0,
+                    10,
+                    ['type' => 'mention', 'module' => $module, 'moduleId' => $moduleId]
+                );
+
+                if ($userMentions === false || count($userMentions) == 0) {
+                    $notification = [
+                        'userId' => $taggedUser,
+                        'read' => '0',
+                        'type' => 'mention',
+                        'module' => $module,
+                        'moduleId' => $moduleId,
+                        'message' => sprintf($this->language->__('text.x_mentioned_you'), $authorName),
+                        'datetime' => dtHelper()->dbNow()->formatDateTimeForDb(), // UTC; date() is the user's tz here (#3201)
+                        'url' => $url,
+                        'authorId' => $authorId,
+                    ];
+
+                    $this->addNotifications([$notification]);
+
+                    // send email
+                    $mailer = app()->make(MailerCore::class);
+                    $mailer->setContext('notify_project_users');
+
+                    $subject = sprintf($this->language->__('text.x_mentioned_you'), $authorName);
+                    $mailer->setSubject($subject);
+
+                    $emailMessage = $subject.' <a href="'.MailerCore::notificationEmailUrl($url, 'mention').'">'.$this->language->__('text.click_here').'</a>';
+                    $mailer->setHtml($emailMessage);
+
+                    $taggedUserObject = $this->userRepository->getUser($taggedUser);
+                    if (isset($taggedUserObject['username'])) {
+                        $mailer->sendMail([$taggedUserObject['username']], 'Shiri');
+                    }
+
+                    UserMentioned::dispatch(
+                        mentionedUserId: (int) $taggedUser,
+                        module: $module,
+                        moduleId: $moduleId > 0 ? $moduleId : null,
+                        projectId: $projectId !== null && $projectId > 0 ? $projectId : null,
+                    );
+                }
+            }
+        }
+    }
+}

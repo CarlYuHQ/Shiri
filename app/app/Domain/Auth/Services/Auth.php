@@ -1,0 +1,947 @@
+<?php
+
+namespace Shiri\Domain\Auth\Services;
+
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Session\SessionManager;
+use Illuminate\Support\Facades\Log;
+use Laravel\Sanctum\HasApiTokens;
+use Shiri\Core\Auth\PasswordFingerprint;
+use Shiri\Core\Configuration\Environment as EnvironmentCore;
+use Shiri\Core\Controller\Frontcontroller as FrontcontrollerCore;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\Http\TrustedAppUrl;
+use Shiri\Core\Language as LanguageCore;
+use Shiri\Core\Mailer as MailerCore;
+use Shiri\Core\UI\Theme;
+use Shiri\Domain\Auth\Events\LoginSucceeded;
+use Shiri\Domain\Auth\Models\Roles;
+use Shiri\Domain\Auth\Repositories\AccessTokenRepository;
+use Shiri\Domain\Auth\Repositories\Auth as AuthRepository;
+use Shiri\Domain\Ldap\Services\Ldap;
+use Shiri\Domain\Setting\Repositories\Setting as SettingRepository;
+use Shiri\Domain\Users\Events\UserCreated;
+use Shiri\Domain\Users\Repositories\Users as UserRepository;
+use Ramsey\Uuid\Uuid;
+
+class Auth implements Authenticatable
+{
+    use DispatchesEvents, HasApiTokens, \Illuminate\Auth\Authenticatable;
+
+    private ?SessionManager $session = null;
+
+    /**
+     * @var string userrole (admin, client, employee)
+     */
+    public string $role = '';
+
+    public array $settings = [];
+
+    /**
+     * @var int time for cookie
+     */
+    public mixed $cookieTime;
+
+    public string $error = '';
+
+    public string $success = '';
+
+    public string|bool $resetInProgress = false;
+
+    /**
+     * How often can a user reset a password before it has to be changed
+     */
+    public int $pwResetLimit = 5;
+
+    private EnvironmentCore $config;
+
+    public LanguageCore $language;
+
+    public SettingRepository $settingsRepo;
+
+    public AuthRepository $authRepo;
+
+    public UserRepository $userRepo;
+
+    private AccessTokenRepository $tokenRepo;
+
+    /**
+     * __construct - getInstance of session and get sessionId and refers to login if post is set
+     *
+     * @throws BindingResolutionException
+     */
+    public function __construct(
+        EnvironmentCore $config,
+        ?SessionManager $session,
+        LanguageCore $language,
+        SettingRepository $settingsRepo,
+        AuthRepository $authRepo,
+        UserRepository $userRepo,
+        AccessTokenRepository $tokenRepo
+    ) {
+        $this->config = $config;
+        $this->session = $session;
+        $this->language = $language;
+        $this->settingsRepo = $settingsRepo;
+        $this->authRepo = $authRepo;
+        $this->userRepo = $userRepo;
+        $this->tokenRepo = $tokenRepo;
+
+        $this->cookieTime = $this->config->sessionExpiration;
+    }
+
+    /**
+     * @return string|bool returns role as string or false on failure
+     *
+     * @throws BindingResolutionException
+     */
+    public static function getRoleToCheck(bool $forceGlobalRoleCheck): string|bool
+    {
+        if (session()->exists('userdata') === false) {
+            return false;
+        }
+
+        if ($forceGlobalRoleCheck) {
+            $roleToCheck = session('userdata.role');
+            // If projectRole is not defined or if it is set to inherited
+        } elseif (! session()->exists('userdata.projectRole') || session('userdata.projectRole') == 'inherited' || session('userdata.projectRole') == '') {
+            $roleToCheck = session('userdata.role');
+            // Do not overwrite admin or owner roles
+        } elseif (Roles::isAtLeast(session('userdata.role'), Roles::$manager)) {
+            $roleToCheck = session('userdata.role');
+            // In all other cases check the project role
+        } else {
+            $roleToCheck = session('userdata.projectRole');
+        }
+
+        // Ensure the role is a valid role. An unresolvable role here makes the permission engine
+        // deny EVERYTHING (every #[RequiresPermission] check fails) — so log it loudly with
+        // context. This exact breadcrumb ("invalid role detected: 50") is what surfaced the 3.9.x
+        // Bearer regression where a session stored the raw role int instead of its name string.
+        if (in_array($roleToCheck, Roles::getRoles()) === false) {
+
+            Log::warning('Invalid role in session — authorization will deny everything. Resolved role: '.var_export($roleToCheck, true).' (user '.(session('userdata.id') ?? 'guest').'). Expected one of: '.implode(', ', Roles::getRoles()));
+
+            return false;
+        }
+
+        return $roleToCheck;
+    }
+
+    /**
+     * login - Validate POST-data with DB
+     *
+     *
+     *
+     * @throws BindingResolutionException
+     */
+    public function login(string $username, string $password): bool
+    {
+        self::dispatch_event('beforeLoginCheck', ['username' => $username, 'password' => $password]);
+
+        // different identity providers can live here
+        // they all need to
+        // // A: ensure the user is in shiri (with a valid role) and if not create the user
+        // // B: set the session variables
+        // // C: update users from the identity provider,
+        // Try Ldap
+        if ($this->config->useLdap === true && extension_loaded('ldap')) {
+            $ldap = app()->make(Ldap::class);
+
+            if ($ldap->connect() && $ldap->bind($username, $password)) {
+                // Update username to include domain
+                $usernameWDomain = $ldap->getEmail($username);
+                // Get user
+                $user = $this->userRepo->getUserByEmail($usernameWDomain);
+
+                $ldapUser = $ldap->getSingleUser($username);
+
+                if ($ldapUser === false) {
+                    return false;
+                }
+
+                // If user does not exist create user
+                if (! $user) {
+                    $userArray = [
+                        'firstname' => $ldapUser['firstname'],
+                        'lastname' => $ldapUser['lastname'],
+                        'phone' => $ldapUser['phone'],
+                        'user' => $ldapUser['user'],
+                        'role' => $ldapUser['role'],
+                        'department' => $ldapUser['department'],
+                        'jobTitle' => $ldapUser['jobTitle'],
+                        'jobLevel' => $ldapUser['jobLevel'],
+                        'password' => '',
+                        'clientId' => '',
+                        'source' => 'ldap',
+                        'status' => 'a',
+                    ];
+
+                    $userId = $this->userRepo->addUser($userArray);
+
+                    if ($userId !== false) {
+                        UserCreated::dispatch(userId: (int) $userId, role: (int) $userArray['role'], source: 'ldap');
+
+                        $user = $this->userRepo->getUserByEmail($usernameWDomain);
+                    } else {
+
+                        Log::error('Ldap user creation failed.');
+
+                        return false;
+                    }
+
+                    // @TODO: create a better login response. This will return that the username or password was not correct
+                } else {
+                    $user['firstname'] = $ldapUser['firstname'];
+                    $user['lastname'] = $ldapUser['lastname'];
+                    $user['phone'] = $ldapUser['phone'];
+                    $user['user'] = $user['username'];
+                    $user['department'] = $ldapUser['department'];
+                    $user['jobTitle'] = $ldapUser['jobTitle'];
+                    $user['jobLevel'] = $ldapUser['jobLevel'];
+
+                    $this->userRepo->editUser($user, $user['id']);
+                }
+
+                if ($user !== false) {
+                    $this->setUserSession($user, true);
+                    $this->learnTrustedAppUrl($user);
+                    $this->dispatchLoginSucceeded($user, 'ldap');
+
+                    return true;
+                } else {
+
+                    Log::info('Could not retrieve user by email');
+
+                    return false;
+                }
+            }
+
+            // Don't return false, to allow the standard login provider to check the db for contractors or clients not
+            // in ldap
+        } elseif ($this->config->useLdap === true && ! extension_loaded('ldap')) {
+            Log::error("Can't use ldap. Extension not installed");
+        }
+
+        // TODO: Single Sign On?
+        // Standard login
+        // Check if the user is in our db
+        // Check even if ldap is turned on to allow contractors and clients to have an account
+        $user = $this->authRepo->getUserByLogin($username, $password);
+
+        if ($user !== false) {
+            $this->setUserSession($user);
+            $this->learnTrustedAppUrl($user);
+            $this->dispatchLoginSucceeded($user, 'password');
+
+            self::dispatch_event('afterLoginCheck', ['username' => $username, 'password' => $password, 'authService' => app()->make(self::class)]);
+
+            return true;
+        } else {
+            $this->logFailedLogin($username);
+            self::dispatch_event('afterLoginCheck', ['username' => $username, 'password' => $password, 'authService' => app()->make(self::class)]);
+
+            return false;
+        }
+    }
+
+    /**
+     * dispatchLoginSucceeded - reports a completed sign-in as {@see LoginSucceeded}.
+     *
+     * Accounts with two-factor authentication have not finished signing in after the first factor,
+     * so for them the method is parked in the session and the event fires from
+     * {@see self::set2FAVerified()} once the second factor passed. Otherwise it fires right away
+     * (and any method parked by an abandoned 2FA sign-in is dropped).
+     *
+     * @internal Not exposed over JSON-RPC; called by the interactive login flows only.
+     *
+     * @param  array  $user  the zp_user row that just signed in
+     * @param  string  $method  how the user authenticated ('password', 'ldap', 'oidc', 'token', ...)
+     */
+    public function dispatchLoginSucceeded(array $user, string $method): void
+    {
+        if (! empty($user['twoFAEnabled'])) {
+            session(['auth.pendingLoginMethod' => $method]);
+
+            return;
+        }
+
+        session()->forget('auth.pendingLoginMethod');
+
+        LoginSucceeded::dispatch(userId: (int) $user['id'], method: $method);
+    }
+
+    /**
+     * learnTrustedAppUrl - records the URL of this sign-in as the trusted app URL for email links
+     * when the user is an owner/admin and no URL is known yet (see {@see TrustedAppUrl}).
+     *
+     * Accounts with two-factor authentication are skipped here: their sign-in is not complete
+     * until the second factor is verified, so the URL is learned then instead
+     * ({@see self::learnTrustedAppUrlAfter2FA()}). A password alone never teaches the URL.
+     *
+     * Never interrupts the login: a failure is logged and ignored.
+     *
+     * @internal Not exposed over JSON-RPC; called by the interactive login flows only.
+     *
+     * @param  array  $user  the zp_user row that just signed in
+     */
+    public function learnTrustedAppUrl(array $user): void
+    {
+        if (! empty($user['twoFAEnabled'])) {
+            return;
+        }
+
+        $this->recordTrustedAppUrl($user['role'] ?? null);
+    }
+
+    /**
+     * learnTrustedAppUrlAfter2FA - records the trusted app URL once the current session has
+     * passed its second factor (same rules as {@see self::learnTrustedAppUrl()}).
+     *
+     * @internal Not exposed over JSON-RPC; called by the 2FA verification flow only.
+     */
+    public function learnTrustedAppUrlAfter2FA(): void
+    {
+        if (! session('userdata.twoFAVerified')) {
+            return;
+        }
+
+        $this->recordTrustedAppUrl(session('userdata.role'));
+    }
+
+    /**
+     * Hands the role and current request to {@see TrustedAppUrl::learnFromAdminLogin()}; never throws.
+     *
+     * @param  mixed  $role  the signed-in user's role (numeric key or role name)
+     */
+    private function recordTrustedAppUrl(mixed $role): void
+    {
+        try {
+            app()->make(TrustedAppUrl::class)->learnFromAdminLogin($role, request());
+        } catch (\Throwable $e) {
+            Log::warning('Could not record the application URL at login: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * Create a new personal access token
+     */
+    public function createToken(string $name, array $abilities = ['*']): array
+    {
+        if (! $this->loggedIn()) {
+            throw new \Exception('User must be authenticated to create token');
+        }
+
+        return $this->tokenRepo->createToken($this->getUserId(), $name, $abilities);
+    }
+
+    /**
+     * setUserSession - establishes the web session for an authenticated user.
+     *
+     * When the session does not already belong to this user (a fresh login) the session id is
+     * regenerated first, so an id planted before authentication can never be carried into the
+     * authenticated session. The session is also pinned to the user's current password hash
+     * (see {@see PasswordFingerprint}) so a later password change logs it out.
+     *
+     * @param  mixed  $user  the zp_user row
+     * @param  bool  $isExternalAuth  true when an external identity provider authenticated the user
+     * @return false|void
+     *
+     * @throws BindingResolutionException
+     */
+    public function setUserSession(mixed $user, bool $isExternalAuth = false)
+    {
+        if (! $user || ! is_array($user)) {
+            return false;
+        }
+
+        if ((int) session('userdata.id') !== (int) $user['id']) {
+            session()->regenerate(true);
+        }
+
+        // Web-login session. twoFAVerified: false — the web flow enforces interactive 2FA via the
+        // AuthCheck gate. Built via the shared factory (role NAME string + consistent fields), with
+        // the web-only globalUserId added on top.
+        $currentUser = UserSessionBuilder::build($user, isExternalAuth: $isExternalAuth, twoFAVerified: false);
+        $currentUser['globalUserId'] = Uuid::uuid5(Uuid::NAMESPACE_DNS, strtolower($user['username']));
+
+        $currentUser = self::dispatch_filter('user_session_vars', $currentUser);
+
+        // Set after the filter so plugins can't drop it. The row may come from a stripped source
+        // without the hash; fall back to the repository so the fingerprint is always real.
+        $passwordHash = array_key_exists('password', $user)
+            ? $user['password']
+            : ($this->userRepo->getUser((int) $user['id'], false)['password'] ?? '');
+        $currentUser['pwfp'] = PasswordFingerprint::of($passwordHash);
+
+        session(['userdata' => $currentUser]);
+        session(['usersettings' => $currentUser['settings']]);
+
+        // The login page itself ran the Localization middleware without a user and cached that,
+        // so drop the flag: the next request then loads this user's timezone, language and date/time
+        // formats. Without it the session kept the server defaults, and calendars ran in the browser's
+        // zone while the server read dates in the default one.
+        session()->forget('localization.cached');
+
+        $this->updateUserSessionDB($currentUser['id'], session()->getId());
+
+        // Clear user theme cache on login
+        Theme::clearCache();
+    }
+
+    public function updateUserSessionDB(int $userId, string $sessionID): bool
+    {
+        return $this->authRepo->updateUserSession($userId, $sessionID, (string) time());
+    }
+
+    /**
+     * logged_in - Check if logged in and Update sessions
+     */
+    public function loggedIn(): bool
+    {
+        // Check if we actually have a php session available
+        if (session()->exists('userdata')) {
+            return true;
+            // If the session doesn't have any session data we are out of sync. Start again
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Checks if a user is logged in.
+     *
+     * @return bool Returns true if the user is logged in, false otherwise.
+     */
+    public static function isLoggedIn(): bool
+    {
+
+        // Check if we actually have a php session available
+        if (session()->exists('userdata')) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * logout - destroy sessions and cookies
+     *
+     *
+     * @throws BindingResolutionException
+     */
+    public function logout(): void
+    {
+
+        $this->authRepo->invalidateSession($this->session->getId());
+
+        $sessionsToDestroy = self::dispatch_filter('sessions_vars_to_destroy', [
+            'userdata',
+            'template',
+            'subdomainData',
+            'currentProject',
+            'currentSprint',
+            'projectsettings',
+            'currentSubscriptions',
+            'lastTicketView',
+            'lastFilteredTicketTableView',
+        ]);
+
+        foreach ($sessionsToDestroy as $key) {
+            session()->forget($key);
+        }
+
+        // Drop the whole session and issue a new id + CSRF token so nothing from the
+        // authenticated session (including its id) survives the logout.
+        session()->invalidate();
+        session()->regenerateToken();
+
+        self::dispatch_event('afterSessionDestroy', ['authService' => app()->make(self::class)]);
+
+    }
+
+    /**
+     * validateResetLink - validates that the password reset link belongs to a user account in the database
+     *
+     * Only a hash of the reset token is stored, so the token from the link is hashed
+     * before it is looked up.
+     *
+     * @param  string  $token  the reset token from the password reset link
+     */
+    public function validateResetLink(string $token): bool
+    {
+        if ($token === '') {
+            return false;
+        }
+
+        return $this->authRepo->validateResetLink($this->hashResetToken($token));
+    }
+
+    /**
+     * hashResetToken - one-way hash of a password reset token as it is stored in the database.
+     *
+     * The token itself is only ever sent to the user by email; a database read therefore
+     * never yields a usable reset link.
+     *
+     * @param  string  $token  the plain reset token
+     * @return string the sha256 hex digest stored in zp_user.pwReset
+     */
+    private function hashResetToken(string $token): string
+    {
+        return hash('sha256', $token);
+    }
+
+    /**
+     * getUserByInviteLink - gets the user by invite link
+     *
+     * @param  string  $hash  invite link hash
+     */
+    public function getUserByInviteLink(string $hash): bool|array
+    {
+        return $this->authRepo->getUserByInviteLink($hash);
+    }
+
+    /**
+     * generateLinkAndSendEmail - generates a password reset link and emails it to the user
+     *
+     * The link is built from the trusted application URL ({@see TrustedAppUrl}), never from the
+     * request host. When no trusted URL is known no email is sent and a warning is logged.
+     *
+     * @param  string  $username  the account's email address
+     * @return bool returns true on success, false on failure
+     *
+     * @throws BindingResolutionException
+     */
+    public function generateLinkAndSendEmail(string $username): bool
+    {
+
+        // The emailed link carries the reset token, so it must point at a URL we trust. Without
+        // one, the only other source is the request's Host header, which the (unauthenticated)
+        // caller controls. The caller sees the same response either way.
+        $trustedAppUrl = app()->make(TrustedAppUrl::class)->get();
+        if ($trustedAppUrl === null) {
+            Log::warning('Password reset email not sent: the application URL is unknown. Set LEAN_APP_URL to your public URL (e.g. https://pm.example.com), or sign in once as an administrator on that URL.');
+
+            return false;
+        }
+
+        $userFromDB = $this->userRepo->getUserByEmail($username);
+
+        if ($userFromDB !== false && count($userFromDB) > 0) {
+            if ($userFromDB['pwResetCount'] < $this->pwResetLimit) {
+                // 256 bits from the CSPRNG. Only the hash is persisted; the plain token
+                // exists solely in the emailed link.
+                $resetToken = bin2hex(random_bytes(32));
+
+                $result = $this->authRepo->setPWResetLink($username, $this->hashResetToken($resetToken));
+
+                if ($result) {
+                    // Don't queue, send right away
+                    $mailer = app()->make(MailerCore::class);
+                    $mailer->setContext('password_reset');
+                    $mailer->setSubject($this->language->__('email_notifications.password_reset_subject'));
+                    $actual_link = $trustedAppUrl.'/auth/resetPw/'.$resetToken;
+                    $mailer->setHtml(sprintf($this->language->__('email_notifications.password_reset_message'), $actual_link));
+                    $to = [$username];
+                    $mailer->sendMail($to, 'Shiri System');
+
+                    return true;
+                }
+            } elseif ($this->config->debug) {
+
+                Log::warning('PW reset failed: maximum request count has been reached for user '.$userFromDB['id']);
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * changePw - sets a new password for the account the reset token belongs to.
+     *
+     * @param  string  $password  the new plain password
+     * @param  string  $token  the reset token from the password reset link
+     * @return bool true when a matching, unexpired reset request was found and updated
+     */
+    public function changePw(string $password, string $token): bool
+    {
+        if ($token === '') {
+            return false;
+        }
+
+        return $this->authRepo->changePW($password, $this->hashResetToken($token));
+    }
+
+    /**
+     * checkPasswordStrength - validates that a password meets the minimum strength requirements.
+     *
+     * Password must be at least 8 characters and include an upper case letter,
+     * a lower case letter, a number and a special character.
+     *
+     * @param  string  $password  the password to validate
+     * @return bool returns true if the password is strong enough, false otherwise
+     */
+    public function checkPasswordStrength(string $password): bool
+    {
+        $uppercase = preg_match('@[A-Z]@', $password);
+        $lowercase = preg_match('@[a-z]@', $password);
+        $number = preg_match('@[0-9]@', $password);
+        $specialChars = preg_match('@[^\w]@', $password);
+
+        if (! $uppercase || ! $lowercase || ! $number || ! $specialChars || strlen($password) < 8) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * resetPassword - validates and applies a password reset for a given reset link.
+     *
+     * Performs the password match check, strength check and persists the new
+     * password. Returns a status string the caller can map to a notification:
+     * 'success', 'mismatch', 'weak' or 'error'.
+     *
+     * @param  string  $password  the new password
+     * @param  string  $passwordConfirm  the password confirmation
+     * @param  string  $hash  the password reset link hash
+     * @return string one of 'success', 'mismatch', 'weak', 'error'
+     *
+     * @api
+     */
+    public function resetPassword(string $password, string $passwordConfirm, string $hash): string
+    {
+        if (strlen($password) === 0 || $password !== $passwordConfirm) {
+            return 'mismatch';
+        }
+
+        if (! $this->checkPasswordStrength($password)) {
+            return 'weak';
+        }
+
+        if ($this->changePw($password, $hash)) {
+            return 'success';
+        }
+
+        return 'error';
+    }
+
+    /**
+     * resolveSafeRedirect - resolves a user supplied redirect target into a safe,
+     * application-internal absolute URL, guarding against open redirects.
+     *
+     * @param  string|null  $redirect  the raw redirect target (typically from the request)
+     * @return string an absolute URL that is safe to redirect to
+     *
+     * @api
+     */
+    public function resolveSafeRedirect(?string $redirect): string
+    {
+        $redirectUrl = BASE_URL.'/dashboard/home';
+
+        if ($redirect !== null && trim($redirect) !== '' && trim($redirect) !== '/') {
+            // Normalize backslash-based protocol tricks (e.g. \/\/attacker.com)
+            // to forward slashes before any checks.
+            $url = str_replace('\\', '/', rawurldecode($redirect));
+
+            // Drop control characters and surrounding whitespace before any guard, so a
+            // padded variant (" //evil.com", "%09//evil.com") can't slip past the checks
+            // below and can't reach the Location header.
+            $url = trim(preg_replace('/[\x00-\x1F\x7F]/', '', $url));
+
+            // Strip the application base URL when present so that same-origin
+            // absolute URLs (e.g. https://my-shiri.com/dashboard/home) are
+            // treated the same as their relative counterparts.
+            //
+            // Match only on a real boundary: a bare str_starts_with() would also fire on
+            // https://hostile.com/pwn when BASE_URL is https://host, rewriting an external
+            // URL into the bogus internal path /ile.com/pwn instead of rejecting it. The
+            // same applies to subdirectory installs (BASE_URL /app vs a /application path).
+            $base = rtrim(BASE_URL, '/');
+
+            if ($base !== '' && (
+                $url === $base
+                || str_starts_with($url, $base.'/')
+                || str_starts_with($url, $base.'?')
+                || str_starts_with($url, $base.'#')
+            )) {
+                $url = substr($url, strlen($base));
+            }
+
+            // Guard: protocol-relative URL (//attacker.com) — explicitly reject.
+            // FILTER_VALIDATE_URL treats these as valid without a scheme, but
+            // browsers resolve them to the current scheme, making them an open
+            // redirect vector.
+            if (str_starts_with($url, '//')) {
+                return $redirectUrl;
+            }
+
+            // Guard: external absolute URL — reject.
+            // filter_var returns the URL (truthy) for well-formed absolute URLs
+            // with a scheme; relative paths return false.
+            if (filter_var($url, FILTER_VALIDATE_URL) !== false) {
+                return $redirectUrl;
+            }
+
+            // At this point $url is a relative path. Guard against an empty
+            // path that could result from stripping a BASE_URL-only input.
+            $url = ltrim($url, '/');
+
+            // Block redirect to logout — allowing a POST-login redirect to
+            // /auth/logout would create a forced-logout loop. Compare the normalized
+            // path so the query string, a trailing slash and casing can't be used to
+            // walk around the block (/auth/logout/, /auth/logout?next=/x, /AUTH/logout).
+            $path = rtrim(strtolower(strtok($url, '?#')), '/');
+
+            if ($url !== '' && $path !== 'auth/logout') {
+                $redirectUrl = BASE_URL.'/'.$url;
+            }
+        }
+
+        return $redirectUrl;
+    }
+
+    /**
+     * shouldHideLoginForm - determines whether the default login form should be hidden,
+     * combining the admin setting with the configured disableLoginForm flag.
+     *
+     * @return bool returns true if the default login form should be hidden
+     *
+     * @api
+     */
+    public function shouldHideLoginForm(): bool
+    {
+        $hideLogin = $this->settingsRepo->getSetting('auth.hideDefaultLogin');
+
+        if (! empty($hideLogin) && $hideLogin == 'on') {
+            return true;
+        }
+
+        return (bool) $this->config->disableLoginForm;
+    }
+
+    /**
+     * getLoginInputPlaceholder - returns the translation key for the login input placeholder
+     * depending on whether LDAP authentication is enabled.
+     *
+     * @return string the placeholder translation key
+     *
+     * @api
+     */
+    public function getLoginInputPlaceholder(): string
+    {
+        if ($this->config->useLdap) {
+            return 'input.placeholders.enter_email_or_username';
+        }
+
+        return 'input.placeholders.enter_email';
+    }
+
+    /**
+     * @throws BindingResolutionException
+     */
+    public static function userIsAtLeast(string $role, bool $forceGlobalRoleCheck = false): bool
+    {
+
+        // Force Global Role check to circumvent projectRole checks for global controllers (users, projects, clients etc)
+        $roleToCheck = self::getRoleToCheck($forceGlobalRoleCheck);
+
+        if ($roleToCheck === false) {
+            return false;
+        }
+
+        if ($role == '' || Roles::getRoleLevel($role) === false) {
+            Log::warning('Check for invalid role detected: '.$role);
+
+            return false;
+        }
+
+        return Roles::isAtLeast($roleToCheck, $role);
+    }
+
+    /**
+     * @throws HttpResponseException
+     */
+    public static function authOrRedirect(array|string $role, bool $forceGlobalRoleCheck = false): bool
+    {
+        if (self::userHasRole($role, $forceGlobalRoleCheck)) {
+            return true;
+        }
+
+        throw new HttpResponseException(FrontcontrollerCore::redirect(BASE_URL.'/errors/error403'));
+    }
+
+    /**
+     * @throws BindingResolutionException
+     */
+    public static function userHasRole(string|array $role, bool $forceGlobalRoleCheck = false): bool
+    {
+
+        // Force Global Role check to circumvent projectRole checks for global controllers (users, projects, clients etc)
+        $roleToCheck = self::getRoleToCheck($forceGlobalRoleCheck);
+
+        // A custom role counts as the built-in role it is based on.
+        $baseRole = $roleToCheck === false ? false : Roles::getBaseRole($roleToCheck);
+
+        if (is_array($role) && (in_array($roleToCheck, $role) || in_array($baseRole, $role, true))) {
+            return true;
+        } elseif ($role == $roleToCheck || ($baseRole !== false && $role === $baseRole)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    public static function getRole(): void {}
+
+    public static function getUserClientId(): mixed
+    {
+        return session('userdata.clientId');
+    }
+
+    public static function getUserId(): mixed
+    {
+        return session('userdata.id');
+    }
+
+    public function use2FA(): mixed
+    {
+        return session('userdata.twoFAEnabled');
+    }
+
+    public function verify2FA(string $code): bool
+    {
+        return app()->make(SecondFactor::class)->verify((string) session('userdata.twoFASecret'), $code);
+    }
+
+    public function get2FAVerified(): mixed
+    {
+        return session('userdata.twoFAVerified');
+    }
+
+    /**
+     * set2FAVerified - marks the session as having passed the second factor.
+     *
+     * The session id is regenerated because the session gains privileges at this point.
+     */
+    public function set2FAVerified(): void
+    {
+        session()->regenerate(true);
+        session(['userdata.twoFAVerified' => true]);
+
+        // The sign-in is complete now: report it with the first factor's method (parked by
+        // dispatchLoginSucceeded()).
+        $pendingLoginMethod = session()->pull('auth.pendingLoginMethod');
+        $userId = (int) session('userdata.id');
+        if (is_string($pendingLoginMethod) && $userId > 0) {
+            LoginSucceeded::dispatch(userId: $userId, method: $pendingLoginMethod);
+        }
+    }
+
+    private function logFailedLogin(string $user): void
+    {
+        $user = $user == '' ? 'unknown' : $user;
+        $date = new \DateTime;
+        $date = $date->format('y:m:d h:i:s');
+
+        // The client's address, honouring the trusted-proxy configuration (LEAN_TRUSTED_PROXIES); behind
+        // a reverse proxy REMOTE_ADDR is always the proxy, so every failed login looked like one host.
+        $ip = request()->getClientIp() ?? 'unknown';
+        $msg = '['.$date.']['.$ip.'] Login failed for user: '.$user;
+
+        Log::info($msg);
+    }
+
+    public function getAuthIdentifierName()
+    {
+        return 'id';
+    }
+
+    /**
+     * Not implemented yet: the Auth service is never used as the authenticated user object.
+     *
+     * @return null
+     */
+    public function getAuthIdentifier()
+    {
+        return null;
+    }
+
+    /**
+     * Not implemented yet: the Auth service is never used as the authenticated user object.
+     * Authenticatable::getAuthPassword is contractually a string.
+     */
+    public function getAuthPassword()
+    {
+        return '';
+    }
+
+    public function getAuthPasswordName()
+    {
+        return 'password';
+    }
+
+    public function getRememberToken()
+    {
+        return ''; // Not implemented yet (Authenticatable::getRememberToken is contractually a string)
+    }
+
+    public function setRememberToken($value)
+    {
+        // Not implemented yet
+    }
+
+    public function getRememberTokenName()
+    {
+        return 'remember_token';
+    }
+
+    public function getUserById($id)
+    {
+        return (object) $this->userRepo->getUser($id);
+    }
+
+    public function validateToken(string $token): bool
+    {
+        $user = $this->getUserByToken($token);
+
+        if ($user) {
+            $this->setUserSession($user);
+            $this->dispatchLoginSucceeded($user, 'token');
+
+            // Turn off 2FA for token verification
+            $this->set2FAVerified();
+
+            return true;
+        }
+
+        return false;
+
+    }
+
+    public function getUserByToken(string $token): array|bool
+    {
+        $tokenModel = $this->tokenRepo->findToken($token);
+
+        if (! $tokenModel) {
+            return false;
+        }
+
+        if ($tokenModel['expires_at'] && strtotime($tokenModel['expires_at']) < time()) {
+            return false;
+        }
+
+        // Load the user associated with this token
+        $user = $this->userRepo->getUser($tokenModel['tokenable_id']);
+        if (! $user) {
+            return false;
+        }
+
+        $this->tokenRepo->updateLastUsedAt($tokenModel['id']);
+
+        return $user;
+
+    }
+}

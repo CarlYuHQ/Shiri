@@ -1,0 +1,90 @@
+<?php
+
+namespace Shiri\Domain\Queue\Services;
+
+use Shiri\Domain\Queue\Repositories\Queue as QueueRepository;
+use Shiri\Domain\Queue\Workers\DefaultWorker;
+use Shiri\Domain\Queue\Workers\EmailWorker;
+use Shiri\Domain\Queue\Workers\HttpRequestWorker;
+use Shiri\Domain\Queue\Workers\Workers;
+
+/**
+ * Queue processing. Not part of the JSON-RPC surface (see processQueue).
+ */
+class Queue
+{
+    private QueueRepository $queue;
+
+    public $availableWorkers = ['email', 'httprequest'];
+
+    /**
+     * Class constructor.
+     *
+     * @param  QueueRepository  $queue  The queue repository.
+     */
+    public function __construct(
+        QueueRepository $queue
+    ) {
+        // NEW Queuing messaging system
+        $this->queue = $queue;
+    }
+
+    /**
+     * Process the queue for a specific worker.
+     *
+     * @param  Workers  $worker  The worker for which to process the queue.
+     * @return bool Returns true if the queue was processed successfully, false otherwise.
+     *
+     * @internal Not exposed over JSON-RPC: workers are driven by the scheduler (see register.php),
+     *           never by an arbitrary authenticated API caller.
+     */
+    public function processQueue(Workers $worker): bool
+    {
+
+        $messages = $this->queue->listMessageInQueue($worker);
+
+        if ($worker == Workers::EMAILS) {
+            $worker = app()->make(EmailWorker::class);
+            $worker->handleQueue($messages);
+        }
+
+        if ($worker == Workers::HTTPREQUESTS) {
+            $worker = app()->make(HttpRequestWorker::class);
+            $worker->handleQueue($messages);
+        }
+
+        if ($worker == Workers::DEFAULT) {
+            $worker = app()->make(DefaultWorker::class);
+            $worker->handleQueue($messages);
+        }
+
+        return true;
+    }
+
+    public function addToQueue(Workers $channel, string $subject, string $message, $projectId)
+    {
+
+        $this->queue->addMessageToQueue(
+            channel: $channel,
+            subject: $subject,
+            message: $message,
+            projectId: $projectId,
+            userId: session('userdata.id'));
+
+    }
+
+    public static function addJob(Workers $channel, string $subject, mixed $message, ?int $userId = null, ?int $projectId = null)
+    {
+
+        $queue = app()->make(QueueRepository::class);
+
+        $queue->addMessageToQueue(
+            channel: $channel,
+            subject: $subject,
+            message: serialize($message),
+            projectId: $projectId ?? session('currentProject'),
+            userId: $userId ?? session('userdata.id')
+        );
+
+    }
+}

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="拾日">
+  <!-- 应用标记：奶油底 + 3×3 月历格子，中间那格被拈起来（放大、倾斜）。
+       和 App 图标同一套几何；导航里只显示 18px，所以格子用淡色块、
+       抬起那格不加投影——形状本身已经够分辨，加阴影只会糊。 -->
+  <defs>
+    <linearGradient id="shiri-cream" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdfaf5"/>
+      <stop offset="1" stop-color="#f0e8dc"/>
+    </linearGradient>
+    <linearGradient id="shiri-clay" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d2673e"/>
+      <stop offset="1" stop-color="#ac4224"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="100" height="100" rx="22.4" fill="url(#shiri-cream)"/>
+
+  <!-- 3×3 格子：中间那格被抬起块盖住，不画 -->
+  <g fill="#221c19" fill-opacity="0.17">
+    <rect x="21.95" y="22.90" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="41.65" y="22.90" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="61.35" y="22.90" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="21.95" y="42.60" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="61.35" y="42.60" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="21.95" y="62.30" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="41.65" y="62.30" width="16.70" height="16.70" rx="4.34"/>
+    <rect x="61.35" y="62.30" width="16.70" height="16.70" rx="4.34"/>
+  </g>
+
+  <!-- 被拾起的那一格 -->
+  <rect x="35.4" y="36.4" width="29.2" height="29.2" rx="6.4"
+        fill="url(#shiri-clay)" transform="rotate(-12 50 51)"/>
+</svg>

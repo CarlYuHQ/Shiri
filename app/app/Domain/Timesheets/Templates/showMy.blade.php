@@ -1,0 +1,370 @@
+@extends($layout)
+@section('content')
+
+@php
+/** @var \Carbon\Carbon $currentDate */
+@endphp
+
+@once
+@push('scripts')
+<script type="text/javascript">
+
+jQuery(document).ready(function(){
+    var startDate;
+    var endDate;
+    var selectCurrentWeek = function () {
+        window.setTimeout(function () {
+            jQuery('.ui-weekpicker').find('.ui-datepicker-current-day a').addClass('ui-state-active').removeClass('ui-state-default');
+        }, 1);
+    };
+
+    var setDates = function (input) {
+        console.log("setting dates");
+        var $input = jQuery(input);
+        var date = $input.datepicker('getDate');
+
+        if (date !== null) {
+            var firstDay = 1
+            var dayAdjustment = date.getDay() - firstDay;
+            if (dayAdjustment < 0) {
+                dayAdjustment += 7;
+            }
+            startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() - dayAdjustment);
+            endDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() - dayAdjustment + 6);
+
+            var inst = $input.data('datepicker');
+            var dateFormat = inst.settings.dateFormat || jQuery.datepicker._defaults.dateFormat;
+            jQuery('#startDate').datepicker("setDate", startDate);
+            jQuery('#endDate').datepicker("setDate", endDate);
+            jQuery('#startDate').val(jQuery.datepicker.formatDate(dateFormat, startDate, inst.settings));
+            jQuery('#endDate').val(jQuery.datepicker.formatDate(dateFormat, endDate, inst.settings));
+        }
+    };
+
+    jQuery('.week-picker').datepicker({
+        dateFormat:  shiri.dateHelper.getFormatFromSettings("dateformat", "jquery"),
+        dayNames: shiri.i18n.__("language.dayNames").split(","),
+        dayNamesMin:  shiri.i18n.__("language.dayNamesMin").split(","),
+        dayNamesShort: shiri.i18n.__("language.dayNamesShort").split(","),
+        monthNames: shiri.i18n.__("language.monthNames").split(","),
+        monthNamesShort: shiri.i18n.__("language.monthNamesShort").split(","),
+        currentText: shiri.i18n.__("language.currentText"),
+        closeText: shiri.i18n.__("language.closeText"),
+        buttonText: shiri.i18n.__("language.buttonText"),
+        isRTL: shiri.i18n.__("language.isRTL") === "true" ? 1 : 0,
+        nextText: shiri.i18n.__("language.nextText"),
+        prevText: shiri.i18n.__("language.prevText"),
+        weekHeader: shiri.i18n.__("language.weekHeader"),
+        firstDay: 1,
+        autoSize: true,
+        navigationAsDateFormat: true,
+        beforeShow: function () {
+            jQuery('#ui-datepicker-div').addClass('ui-weekpicker');
+            selectCurrentWeek();
+        },
+        onClose: function () {
+            jQuery('#ui-datepicker-div').removeClass('ui-weekpicker');
+        },
+        showOtherMonths: true,
+        selectOtherMonths: true,
+        onSelect: function (dateText, inst) {
+
+            setDates(this);
+            selectCurrentWeek();
+            jQuery(this).change();
+            jQuery("#timesheetList").submit();
+        },
+        beforeShowDay: function (date) {
+            var cssClass = '';
+            if (date >= startDate && date <= endDate)
+                cssClass = 'ui-datepicker-current-day';
+            return [true, cssClass];
+        },
+        onChangeMonthYear: function (year, month, inst) {
+            selectCurrentWeek();
+        },
+    });
+
+
+    var $calendarTR = jQuery('.ui-weekpicker .ui-datepicker-calendar tr');
+    $calendarTR.on('mousemove', function () {
+        jQuery(this).find('td a').addClass('ui-state-hover');
+    });
+    $calendarTR.on('mouseleave', function () {
+        jQuery(this).find('td a').removeClass('ui-state-hover');
+    });
+
+    shiri.timesheetsController.initProjectTicketSync(
+        document.querySelector('#projectSelect select'),
+        document.querySelector('#ticketSelect select')
+    );
+
+    jQuery("#nextWeek").click(function() {
+        var date = jQuery("#endDate").datepicker('getDate');
+        var endDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 7);
+        var startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+
+        var inst = jQuery("#endDate").data('datepicker');
+        var dateFormat = inst.settings.dateFormat || jQuery.datepicker._defaults.dateFormat;
+
+        jQuery('#startDate').val(jQuery.datepicker.formatDate(dateFormat, startDate, inst.settings));
+        jQuery('#endDate').val(jQuery.datepicker.formatDate(dateFormat, endDate, inst.settings));
+        jQuery("#timesheetList").submit();
+    });
+
+    jQuery("#prevWeek").click(function() {
+
+        var date = jQuery("#startDate").datepicker('getDate');
+        var endDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() - 1);
+        var startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() - 7);
+
+        var inst = jQuery("#startDate").data('datepicker');
+        var dateFormat = inst.settings.dateFormat || jQuery.datepicker._defaults.dateFormat;
+        jQuery('#startDate').val(jQuery.datepicker.formatDate(dateFormat, startDate, inst.settings));
+        jQuery('#endDate').val(jQuery.datepicker.formatDate(dateFormat, endDate, inst.settings));
+        jQuery("#timesheetList").submit();
+    });
+
+    jQuery(".timesheetTable input").change(function(){
+        let colSum1 = 0; let colSum2 = 0; let colSum3 = 0; let colSum4 = 0;
+        let colSum5 = 0; let colSum6 = 0; let colSum7 = 0;
+
+        jQuery(".timesheetRow").each(function(i){
+            var rowSum = 0;
+            jQuery(this).find("input.hourCell").each(function(){
+                var currentValue = parseFloat(jQuery(this).val());
+                rowSum = Math.round((rowSum + currentValue)*100)/100;
+                var currentClass = jQuery(this).parent().attr('class');
+                if(currentClass.indexOf("rowday1") > -1){ colSum1 = colSum1 + currentValue; }
+                if(currentClass.indexOf("rowday2") > -1){ colSum2 = colSum2 + currentValue; }
+                if(currentClass.indexOf("rowday3") > -1){ colSum3 = colSum3 + currentValue; }
+                if(currentClass.indexOf("rowday4") > -1){ colSum4 = colSum4 + currentValue; }
+                if(currentClass.indexOf("rowday5") > -1){ colSum5 = colSum5 + currentValue; }
+                if(currentClass.indexOf("rowday6") > -1){ colSum6 = colSum6 + currentValue; }
+                if(currentClass.indexOf("rowday7") > -1){ colSum7 = colSum7 + currentValue; }
+            });
+            jQuery(this).find(".rowSum strong").text(rowSum);
+        });
+
+        jQuery("#day1").text(colSum1.toFixed(2)); jQuery("#day2").text(colSum2.toFixed(2));
+        jQuery("#day3").text(colSum3.toFixed(2)); jQuery("#day4").text(colSum4.toFixed(2));
+        jQuery("#day5").text(colSum5.toFixed(2)); jQuery("#day6").text(colSum6.toFixed(2));
+        jQuery("#day7").text(colSum7.toFixed(2));
+
+        var finalSum = colSum1 + colSum2 + colSum3 + colSum4 + colSum5 + colSum6 + colSum7;
+        var roundedSum = Math.round((finalSum)*100)/100;
+        jQuery("#finalSum").text(roundedSum);
+        shiri.timesheetsController.refreshHoursMinutesTitles(".timesheetTable");
+    });
+
+    shiri.timesheetsController.refreshHoursMinutesTitles(".timesheetTable");
+ });
+</script>
+@endpush
+@endonce
+
+<x-global::layout.page-header icon="fa-regular fa-clock" :eyebrow="__('headline.overview')">
+    {!! __('headline.my_timesheets') !!}
+</x-global::layout.page-header>
+
+<div class="maincontent">
+    <x-global::navigation.view-tabs :tabs="[
+        ['url' => BASE_URL.'/timesheets/showMy', 'label' => __('links.week_view'), 'active' => true],
+        ['url' => BASE_URL.'/timesheets/showMyList', 'label' => __('links.list_view'), 'active' => false],
+    ]">
+        <x-slot:actions>
+            {{-- The week range belongs to the #timesheetList form below (form="…"): changing it reloads the week. --}}
+            <span class="lt-tabs-range">
+                <span>{!! __('label.week_from') !!}</span>
+                <a href="javascript:void(0)" id="prevWeek" aria-label="{{ __('language.prevText') }}"><i class="fa fa-chevron-left"></i></a>
+                <input type="text" class="field-width-sm week-picker" name="startDate" form="timesheetList" autocomplete="off" id="startDate" placeholder="{{ __('language.dateformat') }}" value="{{ $dateFrom->formatDateForUser() }}"/>
+                {!! __('label.until') !!}
+                <input type="text" class="field-width-sm week-picker" name="endDate" form="timesheetList" autocomplete="off" id="endDate" placeholder="{{ __('language.dateformat') }}" value="{{ $dateFrom->addDays(6)->formatDateForUser() }}"/>
+                <a href="javascript:void(0)" id="nextWeek" aria-label="{{ __('language.nextText') }}"><i class="fa fa-chevron-right"></i></a>
+                <input type="hidden" name="search" value="1" form="timesheetList" />
+            </span>
+        </x-slot:actions>
+    </x-global::navigation.view-tabs>
+
+    <x-global::layout.content-box>
+        {!! $tpl->displayNotification() !!}
+
+        <form action="{{ BASE_URL }}/timesheets/showMy" method="post" id="timesheetList">
+            <table cellpadding="0" width="100%" class="table table-bordered display timesheetTable" id="dyntableX">
+                <colgroup>
+                      <col class="con0" >
+                      <col class="con1" >
+                      <col class="con0" >
+                      <col class="con1" >
+                      <col class="con0" >
+                      <col class="con1" >
+                      <col class="con0" >
+                      <col class="con1" >
+                      <col class="con0" >
+                      <col class="con1">
+                      <col class="con0">
+                </colgroup>
+                <thead>
+                @php
+                    $days = explode(',', __('language.dayNamesShort'));
+                    $days[] = array_shift($days);
+                @endphp
+                <tr>
+                    <th>{!! __('label.client_product') !!}</th>
+                    <th>{!! __('subtitles.todo') !!}</th>
+                    <th>{!! __('label.type') !!}</th>
+                    @php $i = 0; @endphp
+                    @foreach ($days as $day)
+                        <th class="@if ($dateFrom->addDays($i)->setToUserTimezone()->isToday()) active @endif">{{ $day }}<br />
+                            {{ $dateFrom->addDays($i)->formatDateForUser() }}
+                            @php $i++; @endphp
+                        </th>
+                    @endforeach
+                    <th>{!! __('label.total') !!}</th>
+                </tr>
+                </thead>
+                <tbody>
+                    @php
+                        $colSum = [
+                            'day1' => 0, 'day2' => 0, 'day3' => 0, 'day4' => 0,
+                            'day5' => 0, 'day6' => 0, 'day7' => 0,
+                        ];
+                    @endphp
+                    @foreach ($allTimesheets as $timeRow)
+                        @php $timesheetId = 'new'; @endphp
+                            <tr class="gradeA timesheetRow">
+                                <td width="14%">{{ $timeRow['clientName'] }} // {{ $timeRow['name'] }}</td>
+                                <td width="14%">
+                                    <a href="#/tickets/showTicket/{{ $timeRow['ticketId'] }}">{{ $timeRow['headline'] }}</a>
+                                </td>
+                                <td width="10%">
+                                {!! __($kind[$timeRow['kind'] ?? 'GENERAL_BILLABLE'] ?? $kind['GENERAL_BILLABLE']) !!}
+                            @if ($timeRow['hasTimesheetOffset'])
+                                    <i class="fa-solid fa-clock-rotate-left pull-right label-blue"
+                                       data-tippy-content="{{ __('text.timesheet_other_timezone') }}">
+                                    </i>
+                            @endif
+                                </td>
+
+                            @foreach (array_keys($timeRow) as $dayKey)
+                                @if (str_starts_with($dayKey, 'day'))
+                                    @php $colSum[$dayKey] = ($colSum[$dayKey] ?? 0) + $timeRow[$dayKey]['hours']; @endphp
+
+                                        <td width="7%" class="row{{ $dayKey }}@if ($timeRow[$dayKey]['start']->setToUserTimezone()->isToday()) active @endif">
+
+                                            @php
+                                                $inputNameKey = $timeRow['ticketId'] . '|' . $timeRow['kind'] . '|' . ($timeRow[$dayKey]['actualWorkDate'] ? $timeRow[$dayKey]['actualWorkDate']->formatDateForUser() : 'false') . '|' . ($timeRow[$dayKey]['actualWorkDate'] ? $timeRow[$dayKey]['actualWorkDate']->getTimestamp() : 'false');
+                                            @endphp
+                                            <input type="text"
+                                                   class="hourCell"
+                                                   @if (empty($timeRow[$dayKey]['actualWorkDate']))
+                                                       disabled="disabled"
+                                                   @endif
+                                                   name="{{ $inputNameKey }}"
+                                                   value="{{ $timeRow[$dayKey]['hours'] }}"
+                                                    @if (empty($timeRow[$dayKey]['actualWorkDate']))
+                                                        data-tippy-content="{{ __('text.timesheet_cannot_add_previous_timezone') }}"
+                                                    @endif
+                                            />
+
+                                            @if (! empty($timeRow[$dayKey]['description']))
+                                                <i class="fa fa-circle-info" data-tippy-content="{{ $tpl->escape($timeRow[$dayKey]['description']) }}"></i>
+                                            @endif
+                                        </td>
+                                @endif
+                            @endforeach
+
+                                <td width="7%" class="rowSum"><strong>{{ $timeRow['rowSum'] }}</strong></td>
+                            </tr>
+                    @endforeach
+
+                        <!-- Row to add new time registration -->
+                        <tr class="gradeA timesheetRow">
+                            <td width="14%">
+                                <div class="form-group" id="projectSelect">
+                                    <x-global::forms.select width="sm" enhanced data-placeholder="{{ __('input.placeholders.choose_project') }}" class="project-select">
+                                        <option value=""></option>
+                                        @foreach ($allProjects as $projectRow)
+                                            {!! sprintf(
+                                                $tpl->dispatchTplFilter(
+                                                    'client_product_format',
+                                                    '<option value="%s">%s / %s</option>'
+                                                ),
+                                                ...$tpl->dispatchTplFilter(
+                                                    'client_product_values',
+                                                    [
+                                                        $projectRow['id'],
+                                                        $tpl->escape($projectRow['clientName']),
+                                                        $tpl->escape($projectRow['name']),
+                                                    ]
+                                                )
+                                            ) !!}
+                                        @endforeach
+                                    </x-global::forms.select>
+                                </div>
+                            </td>
+                            <td width="14%">
+                                <div class="form-group" id="ticketSelect">
+                                    <x-global::forms.select width="sm" enhanced data-placeholder="{{ __('input.placeholders.choose_todo') }}" class="ticket-select" name="ticketId">
+                                        <option value=""></option>
+                                        @foreach ($allTickets as $ticketRow)
+                                            @if (in_array($ticketRow['id'], $existingTicketIds))
+                                                @continue
+                                            @endif
+                                            {!! sprintf(
+                                                $tpl->dispatchTplFilter(
+                                                    'todo_format',
+                                                    '<option value="%1$s" data-value="%2$s" class="project_%2$s">%1$s / %3$s</option>'
+                                                ),
+                                                ...$tpl->dispatchTplFilter(
+                                                    'todo_values',
+                                                    [
+                                                        $ticketRow['id'],
+                                                        $ticketRow['projectId'],
+                                                        $tpl->escape($ticketRow['headline']),
+                                                    ]
+                                                )
+                                            ) !!}
+                                        @endforeach
+                                    </x-global::forms.select>
+                                </div>
+                            </td>
+                            <td width="14%">
+                                <x-global::forms.select width="sm" class="kind-select" name="kindId">
+                                    @foreach ($kind as $key => $kindRow)
+                                        <option value="{{ $key }}">{!! __($kindRow) !!}</option>
+                                    @endforeach
+                                </x-global::forms.select>
+                            </td>
+
+                            @php $i = 0; @endphp
+                            @foreach ($days as $day)
+                                <td width="7%" class="rowday{{ $i + 1 }}@if ($dateFrom->addDays($i)->setToUserTimezone()->isToday()) active @endif">
+                                    <input type="text" class="hourCell" name="new|GENERAL_BILLABLE|{{ $dateFrom->addDays($i)->formatDateForUser() }}|{{ $dateFrom->addDays($i)->getTimestamp() }}" value="0" />
+                                </td>
+                                @php $i++; @endphp
+                            @endforeach
+                        </tr>
+                </tbody>
+
+                <tfoot>
+                    <tr style="font-weight:bold;">
+                        <td colspan="3">{!! __('label.total') !!}</td>
+                        @php $totalHours = 0; @endphp
+                        @foreach ($colSum as $key => $col)
+                            @php $totalHours += $col; @endphp
+                            <td id="{{ $key }}">{{ $col }}</td>
+                        @endforeach
+                        <td id="finalSum">{{ $totalHours }}</td>
+                    </tr>
+                </tfoot>
+            </table>
+            <div class="right">
+                <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.save')" name="saveTimeSheet" class="saveTimesheetBtn" />
+            </div>
+            <div class="clearall"></div>
+        </form>
+    </x-global::layout.content-box>
+</div>
+
+@endsection

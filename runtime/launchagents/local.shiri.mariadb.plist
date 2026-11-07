@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.shiri.mariadb</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/mariadb/bin/mariadbd</string>
+        <string>--datadir=/opt/homebrew/var/mysql</string>
+        <string>--port=3306</string>
+        <string>--bind-address=127.0.0.1</string>
+        <string>--socket=/tmp/mariadb_shiri.sock</string>
+        <string>--pid-file=__BASE__/runtime/run/mariadb.pid</string>
+        <string>--log-error=__BASE__/runtime/logs/mariadb-error.log</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>__BASE__/runtime/logs/mariadb-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__BASE__/runtime/logs/mariadb-stderr.log</string>
+</dict>
+</plist>

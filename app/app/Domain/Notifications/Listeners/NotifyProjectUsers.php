@@ -1,0 +1,35 @@
+<?php
+
+namespace Shiri\Domain\Notifications\Listeners;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Shiri\Domain\Notifications\Services\Notifications;
+
+class NotifyProjectUsers
+{
+    /**
+     * @throws BindingResolutionException
+     */
+    public function handle($payload): void
+    {
+
+        $notificationService = app()->make(Notifications::class);
+
+        $notifications = [];
+
+        foreach ($payload['users'] as $user) {
+            $notifications[] = [
+                'userId' => $user['id'],
+                'type' => $payload['type'],
+                'module' => $payload['module'],
+                'moduleId' => $payload['moduleId'],
+                'message' => $payload['message'],
+                'datetime' => dtHelper()->dbNow()->formatDateTimeForDb(), // UTC; date() is the user's tz here (#3201)
+                'url' => $payload['url'],
+                'authorId' => session('userdata.id'),
+            ];
+        }
+
+        $notificationService->addNotifications($notifications);
+    }
+}

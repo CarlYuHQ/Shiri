@@ -1,0 +1,79 @@
+@php
+    use Shiri\Core\Controller\Frontcontroller;
+    use Shiri\Domain\Sprints\Models\Sprints;
+
+    $currentUrlPath = BASE_URL . '/' . str_replace('.', '/', Frontcontroller::getCurrentRoute());
+
+    $currentSprintId = $currentSprint;
+    $searchSprint = $searchCriteria['sprint'] ?? '';
+
+    $sprint = false;
+
+    $currentSprintId = $currentSprintId == '' ? 'all' : $currentSprintId;
+    if ($currentSprintId == 'all') {
+        $sprint = new Sprints;
+        $sprint->id = 'all';
+        $sprint->name = __('links.all_todos');
+    }
+
+    if ($currentSprintId == 'backlog') {
+        $sprint = new Sprints;
+        $sprint->id = 'backlog';
+        $sprint->name = __('links.backlog');
+    }
+
+    if (is_array($sprints)) {
+        foreach ($sprints as $sprintRow) {
+            if ($sprintRow->id == $currentSprintId) {
+                $sprint = $sprintRow;
+                break;
+            }
+        }
+    }
+@endphp
+
+<x-global::layout.page-header icon="fa fa-fw fa-chart-gantt">
+    @if (($sprints !== false) && ($sprints !== null) && count($sprints) > 0)
+        <x-slot:switcher>
+            <x-global::subjectSwitcher
+                :parent="__('headline.milestones')"
+                :current="$sprint !== false ? $sprint->name : __('label.select_board')">
+                <li><a class="wikiModal inlineEdit" href="#/sprints/editSprint/"><i class="fa-solid fa-plus"></i> {!! __('links.create_sprint_no_icon') !!}</a></li>
+                <li class='nav-header border'></li>
+                <li>
+                    <a href="javascript:void(0);" onclick="jQuery('#sprintSelect').val('all'); shiri.ticketsController.initTicketSearchUrlBuilder('{{ $currentUrlPath }}')">{!! __('links.all_todos') !!}</a>
+                </li>
+                <li>
+                    <a href="javascript:void(0);" onclick="jQuery('#sprintSelect').val('backlog'); shiri.ticketsController.initTicketSearchUrlBuilder('{{ $currentUrlPath }}')">{!! __('label.backlog') !!}</a>
+                </li>
+                @foreach ($sprints as $sprintRow)
+                    <li>
+                        <a href="javascript:void(0);" onclick="jQuery('#sprintSelect').val({{ $sprintRow->id }}); shiri.ticketsController.initTicketSearchUrlBuilder('{{ $currentUrlPath }}')">{{ $tpl->escape($sprintRow->name) }}<br /><small>{!! sprintf(__('label.date_from_date_to'), format($sprintRow->startDate)->date(), format($sprintRow->endDate)->date()) !!}</small></a>
+                    </li>
+                @endforeach
+            </x-global::subjectSwitcher>
+        </x-slot:switcher>
+    @else
+        {!! __('headline.milestones') !!}
+    @endif
+    @if (
+        ($currentSprint !== false)
+            && ($currentSprint !== null)
+            && count($sprints) > 0
+            && $currentSprintId != 'all'
+            && $currentSprintId != 'backlog'
+    )
+        <x-slot:actions>
+            <x-global::actions.dropdown variant="header-menu">
+                {{-- Inherited (program-owned) sprints are managed at the program level only.
+                     $sprint can be false (stale/deleted currentSprint), so guard the object access. --}}
+                @if ($login::userIsAtLeast($roles::$editor) && (! is_object($sprint) || empty($sprint->isInherited)))
+                    <li><a href="#/sprints/editSprint/{{ $currentSprint }}">{!! __('link.edit_sprint') !!}</a></li>
+                    <li><a href="#/sprints/delSprint/{{ $currentSprint }}" class="delete">{!! __('links.delete_sprint') !!}</a></li>
+                @endif
+
+            </x-global::actions.dropdown>
+        </x-slot:actions>
+    @endif
+</x-global::layout.page-header>
+<input type="hidden" name="sprintSelect" id="sprintSelect" value="{{ $currentSprintId }}" />

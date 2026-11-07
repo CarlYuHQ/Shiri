@@ -1,0 +1,429 @@
+<?php
+
+/**
+ * Controller / Edit Canvas Item
+ */
+
+namespace Shiri\Domain\Goalcanvas\Controllers;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Support\FromFormat;
+use Shiri\Domain\Comments\Repositories\Comments as CommentRepository;
+use Shiri\Domain\Comments\Services\Comments as CommentService;
+use Shiri\Domain\Goalcanvas\Permissions\GoalcanvasPermissions;
+use Shiri\Domain\Goalcanvas\Repositories\Goalcanvas as GoalcanvaRepository;
+use Shiri\Domain\Goalcanvas\Services\Goalcanvas as GoalcanvaService;
+use Shiri\Domain\Notifications\Models\Notification as NotificationModel;
+use Shiri\Domain\Projects\Services\Projects as ProjectService;
+use Shiri\Domain\Tickets\Services\Tickets as TicketService;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * Goal canvas item editor. Standalone (own get()/post()), independent of the canvas domain.
+ */
+class EditCanvasItem extends Controller
+{
+    protected const CANVAS_NAME = 'goal';
+
+    private GoalcanvaRepository $canvasRepo;
+
+    private CommentRepository $commentsRepo;
+
+    private TicketService $ticketService;
+
+    private ProjectService $projectService;
+
+    private GoalcanvaService $goalService;
+
+    public function init(
+        GoalcanvaRepository $canvasRepo,
+        CommentRepository $commentsRepo,
+        TicketService $ticketService,
+        ProjectService $projectService,
+        GoalcanvaService $goalService
+    ): void {
+        $this->canvasRepo = $canvasRepo;
+        $this->commentsRepo = $commentsRepo;
+        $this->ticketService = $ticketService;
+        $this->projectService = $projectService;
+        $this->goalService = $goalService;
+    }
+
+    /**
+     * @throws \Exception
+     */
+    #[RequiresPermission(GoalcanvasPermissions::VIEW, entityScoped: true)]
+    public function get($params): Response
+    {
+        if (isset($params['id'])) {
+            // Resolve + VIEW-authorize the item against its real project BEFORE any mutation.
+            // false = missing / foreign project / unauthorized (indistinguishable -> no oracle).
+            $canvasItem = $this->goalService->getGoalItem((int) $params['id']);
+            if (! $canvasItem) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $comments = $this->commentsRepo->getComments('goalcanvasitem', $canvasItem['id']);
+            $this->tpl->assign(
+                'numComments',
+                $this->commentsRepo->countComments('goalcanvasitem', $canvasItem['id'])
+            );
+        } else {
+            $canvasItem = [
+                'id' => '',
+                'box' => 'goal',
+                'title' => '',
+                'description' => '',
+                'status' => array_key_first($this->canvasRepo->getStatusLabels()),
+                'relates' => '',
+                'startValue' => '',
+                'currentValue' => '',
+                'canvasId' => $_GET['canvasId'] ?? (int) session('currentGOALCanvas'),
+                'endValue' => '',
+                'kpi' => '',
+                'startDate' => '',
+                'endDate' => '',
+                'setting' => '',
+                'metricType' => '',
+                'assignedTo' => '',
+                'parent' => '',
+            ];
+
+            $comments = [];
+        }
+
+        $this->tpl->assign('id', $canvasItem['id'] ?? '');
+        $this->tpl->assign('canvasId', $canvasItem['canvasId']);
+        $this->tpl->assign('comments', $comments);
+
+        // Scope the milestone options to the GOAL's real project (goal↔milestone
+        // is same-project), not the session project — the dialog can be opened
+        // for a goal outside the current project. New goals fall back to session.
+        $goalProjectId = $canvasItem['projectId'] ?? session('currentProject');
+        $allProjectMilestones = $this->ticketService->getAllMilestones(['sprint' => '', 'type' => 'milestone', 'currentProject' => $goalProjectId]);
+        $this->tpl->assign('milestones', $allProjectMilestones);
+
+        // Linked-milestone chips + status summary for the goal editor (edge model).
+        if (($canvasItem['id'] ?? '') !== '') {
+            $goalMilestones = $this->goalService->getGoalMilestones((int) $canvasItem['id']);
+            $this->tpl->assign('goalMilestones', $goalMilestones['milestones']);
+            $this->tpl->assign('milestoneSummary', $goalMilestones['summary']);
+        } else {
+            $this->tpl->assign('goalMilestones', []);
+            $this->tpl->assign('milestoneSummary', ['total' => 0, 'done' => 0, 'inProgress' => 0, 'notStarted' => 0]);
+        }
+
+        $this->tpl->assign('currentCanvas', $canvasItem['canvasId']);
+        $this->tpl->assign('canvasItem', $canvasItem);
+        $this->tpl->assign('canvasIcon', $this->canvasRepo->getIcon());
+        $this->tpl->assign('canvasTypes', $this->canvasRepo->getCanvasTypes());
+        $this->tpl->assign('statusLabels', $this->canvasRepo->getStatusLabels());
+        $this->tpl->assign('dataLabels', $this->canvasRepo->getDataLabels());
+
+        return $this->tpl->displayPartial('goalcanvas.canvasDialog');
+    }
+
+    /**
+     * @throws BindingResolutionException
+     */
+    #[RequiresPermission(GoalcanvasPermissions::EDIT, entityScoped: true)]
+    public function post($params): Response
+    {
+
+        // Detach a milestone edge. State-changing, so it goes through POST (not a
+        // GET link) with a CSRF token — the chip's remove control is an hx-post.
+        // Authorized by the service (EDIT against the item's real project; a
+        // view-only user is denied). Returns the re-rendered milestones section
+        // (hx-target="#goalMsSection" outerHTML) so the summary counts and
+        // scroll arrow update with the removed chip, not just the chip node.
+        if (isset($_POST['removeMilestone']) && isset($params['id'])) {
+            $itemId = (int) $params['id'];
+            $this->goalService->removeMilestoneFromGoal($itemId, (int) $_POST['removeMilestone']);
+
+            // getGoalItem() always stamps the goal's REAL projectId on success;
+            // false only for a missing/foreign/unauthorized goal — fail closed
+            // rather than fall back to the SESSION project, which could load
+            // another project's milestone options into the re-rendered picker.
+            $canvasItem = $this->goalService->getGoalItem($itemId);
+            if (! $canvasItem) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $goalMilestones = $this->goalService->getGoalMilestones($itemId);
+            $this->tpl->assign('id', $itemId);
+            $this->tpl->assign('goalMilestones', $goalMilestones['milestones']);
+            $this->tpl->assign('milestoneSummary', $goalMilestones['summary']);
+            $this->tpl->assign('milestones', $this->ticketService->getAllMilestones([
+                'sprint' => '', 'type' => 'milestone',
+                'currentProject' => $canvasItem['projectId'],
+            ]));
+
+            return $this->tpl->displayPartial('goalcanvas::partials.milestonesSection');
+        }
+
+        // Delete comment (POST only: it changes data) — only when it belongs to THIS gated item
+        // (module + moduleId); deleteComment() filters on the comment id alone, so the bind
+        // prevents deleting a foreign item's / project's comment.
+        if (isset($_POST['delComment']) && isset($params['id'])) {
+            $canvasItem = $this->goalService->getGoalItem((int) $params['id']);
+            if (! $canvasItem) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $commentId = (int) ($_POST['delComment']);
+            $comment = $this->commentsRepo->getComment($commentId);
+            if ($comment !== false
+                && (string) $comment['module'] === 'goalcanvasitem'
+                && (int) $comment['moduleId'] === (int) $canvasItem['id']) {
+                // Through the service: author-or-moderator check on top of the item binding.
+                if (app()->make(CommentService::class)->deleteComment($commentId)) {
+                    $this->tpl->setNotification($this->language->__('notifications.comment_deleted'), 'success');
+                }
+            }
+
+            return Frontcontroller::redirect(BASE_URL.'/goalcanvas/editCanvasItem/'.(int) $canvasItem['id']);
+        }
+
+        if (isset($params['comment']) && isset($params['id'])) {
+            $itemId = (int) $params['id'];
+
+            // Only allow commenting on a goal item the user can view in their project.
+            if (! $this->goalService->getGoalItem($itemId)) {
+                return $this->tpl->displayPartial('errors.error404');
+            }
+
+            $values = [
+                'text' => $params['text'],
+                'date' => dtHelper()->dbNow()->formatDateTimeForDb(),
+                'userId' => (session('userdata.id')),
+                'moduleId' => $itemId,
+                'commentParent' => ($params['father']),
+            ];
+
+            if ($params['text'] != '') {
+                $commentId = $this->commentsRepo->addComment($values, 'goalcanvasitem');
+                $this->tpl->setNotification($this->language->__('notifications.comment_create_success'), 'success');
+                $values['id'] = $commentId;
+
+                $subject = $this->language->__('email_notifications.canvas_board_comment_created');
+                $actual_link = BASE_URL.'#/goalcanvas/editCanvasItem/'.$itemId;
+                $message = sprintf(
+                    $this->language->__('email_notifications.canvas_item__comment_created_message'),
+                    session('userdata.name')
+                );
+
+                $notification = app()->make(NotificationModel::class);
+                $notification->url = [
+                    'url' => $actual_link,
+                    'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+                ];
+                $notification->entity = $values;
+                $notification->module = 'goalcanvas';
+                $notification->action = 'commented';
+                $notification->projectId = session('currentProject');
+                $notification->subject = $subject;
+                $notification->authorId = session('userdata.id');
+                $notification->message = $message;
+
+                $this->projectService->notifyProjectUsers($notification);
+
+                return Frontcontroller::redirect(BASE_URL.'/goalcanvas/editCanvasItem/'.$itemId);
+            }
+        }
+
+        if (isset($params['changeItem'])) {
+            $currentCanvasId = $params['canvasId'] ?? (int) session('current'.strtoupper(static::CANVAS_NAME).'Canvas');
+
+            if (isset($params['itemId']) && ! empty($params['itemId'])) {
+                if (isset($params['title']) && ! empty($params['title'])) {
+                    $canvasItem = [
+                        'box' => $params['box'],
+                        'author' => session('userdata.id'),
+                        'title' => $params['title'],
+                        'description' => $params['description'] ?? '',
+                        'status' => $params['status'] ?? '',
+                        'relates' => '',
+                        'startValue' => $params['startValue'] ?? '',
+                        'currentValue' => $params['currentValue'] ?? '',
+                        'endValue' => $params['endValue'] ?? '',
+                        'itemId' => $params['itemId'],
+                        'canvasId' => $params['canvasId'],
+                        'parent' => $params['parent'] ?? null,
+                        'id' => $params['itemId'],
+                        'kpi' => $params['kpi'] ?? '',
+                        'startDate' => format(value: $params['startDate'] ?? '', fromFormat: FromFormat::UserDateStartOfDay)->isoDateTime(),
+                        'endDate' => format(value: $params['endDate'] ?? '', fromFormat: FromFormat::UserDateEndOfDay)->isoDateTime(),
+                        'setting' => $params['setting'] ?? '',
+                        'metricType' => $params['metricType'] ?? '',
+                        'assignedTo' => $params['assignedTo'] ?? '',
+                        // milestoneId intentionally omitted — milestone links are
+                        // now edges, managed by add/removeMilestoneToGoal, so a
+                        // goal save must not reconcile them down to one value.
+                    ];
+
+                    // Resolves the item's real project from itemId and authorizes EDIT there.
+                    $this->goalService->updateGoalItem($canvasItem);
+
+                    // Append a milestone link (new or existing) — leaves the
+                    // goal's other linked milestones intact.
+                    $milestoneToLink = 0;
+                    if (isset($params['newMilestone']) && $params['newMilestone'] != '') {
+                        // Create the milestone in the GOAL's real project (goal↔milestone
+                        // is same-project), not the session project — otherwise a
+                        // cross-project dialog would create it in the wrong project and
+                        // the same-project link guard would then reject it.
+                        $goalItem = $this->goalService->getGoalItem((int) $params['itemId']);
+                        $params['projectId'] = ($goalItem['projectId'] ?? null) ?: session('currentProject');
+                        $params['headline'] = $params['newMilestone'];
+                        $params['tags'] = '#ccc';
+                        $params['editFrom'] = dtHelper()->userNow()->formatDateForUser();
+                        $params['editTo'] = dtHelper()->userNow()->addDays(7)->formatDateForUser();
+                        $params['dependentMilestone'] = '';
+                        $newId = $this->ticketService->quickAddMilestone($params);
+                        if ($newId !== false) {
+                            $milestoneToLink = (int) $newId;
+                        }
+                    } elseif (isset($params['existingMilestone']) && $params['existingMilestone'] != '') {
+                        $milestoneToLink = (int) $params['existingMilestone'];
+                    }
+                    if ($milestoneToLink > 0) {
+                        $this->goalService->addMilestoneToGoal((int) $params['itemId'], $milestoneToLink);
+                    }
+
+                    $comments = $this->commentsRepo->getComments('goalcanvasitem', $params['itemId']);
+                    $this->tpl->assign('numComments', $this->commentsRepo->countComments(
+                        'goalcanvasitem',
+                        $params['itemId']
+                    ));
+                    $this->tpl->assign('comments', $comments);
+
+                    $this->tpl->setNotification($this->language->__('notifications.canvas_item_updates'), 'success', 'goal_created');
+
+                    $subject = $this->language->__('email_notifications.canvas_board_edited');
+                    $actual_link = BASE_URL.'#/goalcanvas/editCanvasItem/'.(int) $params['itemId'];
+                    $message = sprintf(
+                        $this->language->__('email_notifications.canvas_item_update_message'),
+                        session('userdata.name'),
+                        strip_tags($canvasItem['description'])
+                    );
+
+                    $notification = app()->make(NotificationModel::class);
+                    $notification->url = [
+                        'url' => $actual_link,
+                        'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+                    ];
+                    $notification->entity = $canvasItem;
+                    $notification->module = 'goalcanvas';
+                    $notification->action = 'updated';
+                    $notification->projectId = session('currentProject');
+                    $notification->subject = $subject;
+                    $notification->authorId = session('userdata.id');
+                    $notification->message = $message;
+
+                    $this->projectService->notifyProjectUsers($notification);
+                } else {
+                    $this->tpl->setNotification($this->language->__('notification.please_enter_title'), 'error');
+                }
+
+                return Frontcontroller::redirect(BASE_URL.'/goalcanvas/editCanvasItem/'.$params['itemId']);
+            } else {
+
+                if (isset($_POST['title']) && ! empty($_POST['title'])) {
+                    $canvasItem = [
+                        'box' => $params['box'],
+                        'author' => session('userdata.id'),
+                        'title' => $params['title'],
+                        'description' => $params['description'] ?? '',
+                        'status' => $params['status'] ?? '',
+                        'relates' => '',
+                        'startValue' => $params['startValue'] ?? '',
+                        'currentValue' => $params['currentValue'] ?? '',
+                        'endValue' => $params['endValue'] ?? '',
+                        'canvasId' => $params['canvasId'],
+                        'parent' => $params['parent'] ?? null,
+                        'kpi' => $params['kpi'] ?? '',
+                        'startDate' => format(value: $params['startDate'] ?? '', fromFormat: FromFormat::UserDateStartOfDay)->isoDateTime(),
+                        'endDate' => format(value: $params['endDate'] ?? '', fromFormat: FromFormat::UserDateEndOfDay)->isoDateTime(),
+                        'setting' => $params['setting'] ?? '',
+                        'metricType' => $params['metricType'] ?? '',
+                        'assignedTo' => $params['assignedTo'] ?? '',
+                    ];
+                    // Resolves the target board's real project from canvasId and authorizes CREATE.
+                    $id = $this->goalService->createGoalItem($canvasItem);
+                    $canvasTypes = $this->canvasRepo->getCanvasTypes();
+
+                    $this->tpl->setNotification(sprintf($this->language->__('notification.canvas_item_created'), $canvasTypes[$params['box']]['title']), 'success', 'goal_item_created');
+
+                    $subject = $this->language->__('email_notifications.canvas_board_item_created');
+                    $actual_link = BASE_URL.'#/goalcanvas/editCanvasItem/'.(int) $params['itemId'];
+                    $message = sprintf(
+                        $this->language->__('email_notifications.canvas_item_created_message'),
+                        session('userdata.name'),
+                        strip_tags($canvasItem['description'])
+                    );
+
+                    $notification = app()->make(NotificationModel::class);
+                    $notification->url = [
+                        'url' => $actual_link,
+                        'text' => $this->language->__('email_notifications.canvas_item_update_cta'),
+                    ];
+
+                    $notification->entity = $canvasItem;
+                    $notification->module = 'goalcanvas';
+                    $notification->action = 'created';
+                    $notification->projectId = session('currentProject');
+                    $notification->subject = $subject;
+                    $notification->authorId = session('userdata.id');
+                    $notification->message = $message;
+
+                    $this->projectService->notifyProjectUsers($notification);
+
+                    $this->tpl->setNotification($this->language->__('notification.element_created'), 'success');
+                } else {
+                    $id = '';
+                    $this->tpl->setNotification($this->language->__('notification.please_enter_title'), 'error');
+                }
+
+                return Frontcontroller::redirect(BASE_URL.'/goalcanvas/editCanvasItem/'.$id);
+            }
+        }
+
+        $this->tpl->assign('canvasTypes', $this->canvasRepo->getCanvasTypes());
+        $this->tpl->assign('statusLabels', $this->canvasRepo->getStatusLabels());
+
+        $this->tpl->assign('dataLabels', $this->canvasRepo->getDataLabels());
+
+        if (isset($params['id'])) {
+            $canvasItemId = (int) $params['id'];
+            $comments = $this->commentsRepo->getComments('goalcanvasitem', $canvasItemId);
+            $this->tpl->assign('canvasItem', $this->goalService->getGoalItem($canvasItemId));
+        } else {
+            $value = [
+                'id' => '',
+                'box' => $params['box'],
+                'author' => session('userdata.id'),
+                'title' => '',
+                'description' => '',
+                'status' => array_key_first($this->canvasRepo->getStatusLabels()),
+                'relates' => array_key_first($this->canvasRepo->getRelatesLabels()),
+                'startValue' => '',
+                'currentValue' => '',
+                'endValue' => '',
+                'kpi' => '',
+                'startDate' => '',
+                'endDate' => '',
+                'setting ' => '',
+                'metricType' => '',
+                'assignedTo' => session('userdata.id'),
+            ];
+            $comments = [];
+            $this->tpl->assign('canvasItem', $value);
+        }
+        $this->tpl->assign('comments', $comments);
+
+        return $this->tpl->displayPartial('goalcanvas.editCanvasItem');
+    }
+}

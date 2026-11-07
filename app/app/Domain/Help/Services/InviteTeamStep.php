@@ -1,0 +1,108 @@
+<?php
+
+namespace Shiri\Domain\Help\Services;
+
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\UI\Template;
+use Shiri\Domain\Help\Contracts\OnboardingSteps;
+use Shiri\Domain\Projects\Services\Projects;
+use Shiri\Domain\Users\Services\Users;
+
+class InviteTeamStep implements OnboardingSteps
+{
+    use DispatchesEvents;
+
+    public function __construct(
+        private Projects $projectService,
+        private Users $userService,
+        private Template $tplService
+    ) {}
+
+    public function getTitle(): string
+    {
+        return __('label.onboarding_step_invite_team');
+    }
+
+    /**
+     * Retrieves the action for the current request.
+     *
+     * This method is responsible for returning the action to be performed based on the current request.
+     * The action is returned as a string.
+     *
+     * @return string The action to be performed.
+     */
+    public function getAction(): string
+    {
+        // TODO: Implement getAction() method.
+        return 'InviteTeam';
+    }
+
+    /**
+     * Retrieves the template for the current request.
+     *
+     * This method is responsible for returning the template to be used for rendering the content based on the current request.
+     * The template is returned as a string.
+     *
+     * @return string The template to be used for rendering the content.
+     */
+    public function getTemplate(): string
+    {
+        return 'help.inviteTeamStep';
+    }
+
+    /**
+     * Handles the given parameters for performing a specific action.
+     *
+     * This method is responsible for processing and handling the given parameters for performing a specific action.
+     * It iterates over the parameters and checks if the corresponding email is set and not empty.
+     * If the email is valid and does not exist as a username, it creates a new user invite and then establishes a relation
+     * between the new user and the current project.
+     * In the end, a success notification is set, replaced by an error when an invitation email could not be sent.
+     *
+     * @param  array  $params  The parameters to be handled.
+     * @return bool True if the handling was successful, false otherwise.
+     */
+    public function handle($params): bool
+    {
+
+        $allEmailsSent = true;
+
+        for ($i = 1; $i <= 3; $i++) {
+            if (isset($params['email'.$i]) && $params['email'.$i] != '') {
+                $values = [
+                    'firstname' => '',
+                    'lastname' => '',
+                    'user' => ($params['email'.$i]),
+                    'phone' => '',
+                    'role' => '20',
+                    'password' => '',
+                    'pwReset' => '',
+                    'status' => '',
+                    'clientId' => '',
+                ];
+
+                if (filter_var($params['email'.$i], FILTER_VALIDATE_EMAIL)) {
+                    if ($this->userService->usernameExist($params['email'.$i]) === false) {
+                        $invite = $this->userService->createUserInviteWithStatus($values);
+                        if ($invite !== false) {
+                            $this->projectService->editUserProjectRelations((int) $invite['userId'], [session('currentProject')]);
+
+                            if (! $invite['emailSent']) {
+                                $allEmailsSent = false;
+                            }
+                        }
+                    }
+                }
+
+                $this->tplService->setNotification(__('notification.invitation_sent'), 'success', 'user_invited');
+            }
+        }
+
+        // The users exist either way; say so when an invitation email did not go out.
+        if (! $allEmailsSent) {
+            $this->tplService->setNotification(__('notification.invite_email_failed'), 'error', 'user_invited');
+        }
+
+        return true;
+    }
+}

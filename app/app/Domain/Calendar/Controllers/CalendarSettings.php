@@ -1,0 +1,61 @@
+<?php
+
+namespace Shiri\Domain\Calendar\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Domain\Calendar\Permissions\CalendarPermissions;
+use Shiri\Domain\Calendar\Services\Calendar as CalendarService;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * CalendarSettings Controller - Displays calendar settings modal.
+ *
+ * Plugins can register additional settings sections via the filter:
+ * 'shiri.domain.calendar.controllers.calendarsettings.get.calendarSettings.sections'
+ *
+ * Plugins can mark calendars as plugin-managed (hides edit/delete UI) via the filter:
+ * 'shiri.domain.calendar.controllers.calendarsettings.get.calendarSettings.externalCalendars'
+ *
+ * Section array structure:
+ *   - id: string (unique identifier)
+ *   - icon: string (FontAwesome class or SVG markup)
+ *   - iconType: string ('fontawesome'|'svg', default 'fontawesome')
+ *   - title: string (section heading)
+ *   - description: string (optional description text)
+ *   - content: string (raw HTML content - plugin must sanitize)
+ *   - actions: array (optional action buttons with url, label, class, icon, type keys)
+ */
+class CalendarSettings extends Controller
+{
+    private CalendarService $calendarService;
+
+    /**
+     * Initialize the controller with dependencies.
+     */
+    public function init(CalendarService $calendarService): void
+    {
+        $this->calendarService = $calendarService;
+    }
+
+    /**
+     * Display the Calendar Settings modal.
+     */
+    #[RequiresPermission(CalendarPermissions::VIEW)]
+    public function get(array $params): Response
+    {
+        // Get external calendars for the current user
+        $externalCalendars = $this->calendarService->getMyExternalCalendars((int) session('userdata.id'));
+
+        // Plugins can augment calendar data (e.g., add 'managedByPlugin' => true to hide edit/delete)
+        $externalCalendars = self::dispatchFilter('calendarSettings.externalCalendars', $externalCalendars);
+
+        // Plugins can add their settings sections via this filter
+        $pluginSections = self::dispatchFilter('calendarSettings.sections', []);
+
+        $this->tpl->assign('externalCalendars', $externalCalendars);
+        $this->tpl->assign('pluginSections', $pluginSections);
+
+        return $this->tpl->displayPartial('calendar.calendarSettings');
+    }
+}

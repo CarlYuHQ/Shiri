@@ -1,0 +1,135 @@
+@extends($layout)
+@section('content')
+
+<div id="fileManager">
+    <div>
+
+        {!! $tpl->displayNotification() !!}
+
+        <div class='mediamgr'>
+            <div class='mediamgr_left'>
+                <div class="mediamgr_category">
+
+                    <form action='{{ BASE_URL }}/files/showAll{{ isset($_GET['modalPopUp']) ? '?modalPopUp=true' : '' }}' method='post' enctype="multipart/form-data" class="fileModal" >
+                        <div class="par f-left" style="margin-right: 15px;">
+
+                            <div class='fileupload fileupload-new' data-provides='fileupload'>
+                                <input type="hidden" />
+                                <div class="input-append">
+                                    <div class="uneditable-input span3">
+                                        <i class="fa-file fileupload-exists"></i><span class="fileupload-preview"></span>
+                                    </div>
+                                    <span class="btn btn-file">
+                                    <span class="fileupload-new">{{ __('label.select_file') }}</span>
+                                    <span class='fileupload-exists'>{{ __('buttons.change') }}</span>
+                                    <input type='file' name='file' />
+                                </span>
+
+                                    <a href='#' class='btn fileupload-exists' data-dismiss='fileupload'>{{ __('buttons.remove') }}</a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.upload')" name="upload" />
+
+                    </form>
+
+                </div>
+
+                <div class="mediamgr_content">
+
+                    <ul id='medialist' class='listfile'>
+                        @foreach ($files as $file)
+                            <x-global::elements.card as="li" compact class="{{ $file['moduleId'] }}">
+                                <x-global::actions.dropdown class="dropright" style="float:right;">
+                                    <li class="nav-header">{!! __('subtitles.file') !!}</li>
+                                    <li><a target="_blank" href="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}">{!! __('links.download') !!}</a></li>
+
+                                    @if ($login::userIsAtLeast($roles::$editor))
+                                        <li>
+                                            <form method="post" action="{{ BASE_URL }}/files/showAll" class="deleteFile" onsubmit="return confirm('{{ __('text.confirm_delete') }}')">
+                                                @csrf
+                                                <input type="hidden" name="delFile" value="{{ $file['id'] }}" />
+                                                <button type="submit" class="delete" style="background:none;border:none;cursor:pointer;padding:3px 20px;width:100%;text-align:left;"><i class="fa fa-trash"></i> {!! __('links.delete') !!}</button>
+                                            </form>
+                                        </li>
+                                    @endif
+
+
+                                </x-global::actions.dropdown>
+                                <a class="imageLink" href="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}">
+                                    @if (in_array(strtolower($file['extension']), $imgExtensions))
+                                        <img style='max-height: 50px; max-width: 70px;' src="{{ BASE_URL }}/files/get?module={{ $file['module'] }}&encName={{ $file['encName'] }}&ext={{ $file['extension'] }}&realName={{ $file['realName'] }}" alt="" />
+                                    @else
+                                        <img style='max-height: 50px; max-width: 70px;' src='{{ BASE_URL }}/dist/images/thumbs/doc.png' />
+                                    @endif
+                                    <x-files::fileName :file="$file" />
+                                </a>
+                            </x-global::elements.card>
+                        @endforeach
+                        <br class="clearall" />
+                    </ul>
+                    <br class="clearall" />
+
+                </div><!--mediamgr_content-->
+
+            </div><!--mediamgr_left -->
+
+
+            <br class="clearall" />
+        </div><!--mediamgr-->
+
+
+    </div>
+</div>
+
+@once
+@push('scripts')
+<script type="text/javascript">
+    jQuery(document).ready(function(){
+
+        //Replaces data-rel attribute to rel.
+        //We use data-rel because of w3c validation issue
+        jQuery('a[data-rel]').each(function() {
+            jQuery(this).attr('rel', jQuery(this).data('rel'));
+        });
+
+        //jQuery("#medialist a").colorbox();
+
+        @if (isset($_GET['modalPopUp']))
+        jQuery('#medialist a.imageLink').on("click", function(event){
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+
+            var url = jQuery(this).attr("href");
+
+            //File picker upload callback from editor
+            window.filePickerCallback(url, {text: "file"});
+
+            jQuery.nmTop().close();
+        });
+
+        @endif
+
+        // Media Filter
+        jQuery('#mediafilter a').on("click", function(){
+
+            var filter = (jQuery(this).attr('href') != 'all')? '.'+jQuery(this).attr('href') : '*';
+            jQuery('#medialist').isotope({ filter: filter });
+
+            jQuery('#mediafilter li').removeClass('current');
+            jQuery(this).parent().addClass('current');
+
+            return false;
+        });
+
+        jQuery(".deleteFile").nyroModal();
+
+
+    });
+</script>
+@endpush
+@endonce
+
+@endsection

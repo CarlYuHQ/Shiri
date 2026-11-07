@@ -1,0 +1,170 @@
+<?php
+
+namespace Shiri\Domain\Clients\Controllers;
+
+use Shiri\Core\Auth\Permissions\RequiresPermission;
+use Shiri\Core\Controller\Controller;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Exceptions\MissingParameterException;
+use Shiri\Domain\Clients\Permissions\ClientsPermissions;
+use Shiri\Domain\Clients\Services\Clients as ClientService;
+use Shiri\Domain\Comments\Services\Comments as CommentService;
+use Shiri\Domain\Files\Services\Files as FileService;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * ShowClient Controller - Show one client.
+ */
+class ShowClient extends Controller
+{
+    private ClientService $clientService;
+
+    private CommentService $commentService;
+
+    private FileService $fileService;
+
+    /**
+     * Initializes dependencies.
+     */
+    public function init(
+        ClientService $clientService,
+        CommentService $commentService,
+        FileService $fileService
+    ): void {
+        $this->clientService = $clientService;
+        $this->commentService = $commentService;
+        $this->fileService = $fileService;
+
+        if (! session()->exists('lastPage')) {
+            session(['lastPage' => BASE_URL.'/clients/showAll']);
+        }
+    }
+
+    /**
+     * Displays the client detail page.
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(ClientsPermissions::VIEW, global: true)]
+    public function get(array $params): Response
+    {
+        if (! isset($params['id'])) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        $id = (int) $params['id'];
+        $client = $this->clientService->get($id);
+
+        if ($client === false) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        if (session('userdata.role') == 'admin') {
+            $this->tpl->assign('admin', true);
+        }
+
+        $this->tpl->assign('client', $client);
+
+        $pageData = $this->clientService->getClientPageData($id);
+        array_map([$this->tpl, 'assign'], array_keys($pageData), array_values($pageData));
+
+        return $this->tpl->display('clients.showClient');
+    }
+
+    /**
+     * Handles client detail form submissions (save, upload, comment).
+     *
+     * @param  array  $params  Request parameters
+     */
+    #[RequiresPermission(ClientsPermissions::EDIT, global: true)]
+    public function post(array $params): Response
+    {
+        if (! isset($params['id'])) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        $id = (int) $params['id'];
+        $client = $this->clientService->get($id);
+
+        if ($client === false) {
+            return $this->tpl->display('errors.error404', responseCode: 404);
+        }
+
+        // Handle file deletion (POST only: it changes data)
+        if (isset($_POST['delFile'])) {
+            if ($this->fileService->deleteFile($_POST['delFile']) === true) {
+                $this->tpl->setNotification($this->language->__('notifications.file_deleted'), 'success', 'clientfile_deleted');
+            } else {
+                $this->tpl->setNotification($this->language->__('notifications.file_deleted_error'), 'error');
+            }
+
+            return Frontcontroller::redirect(BASE_URL.'/clients/showClient/'.$id.'#files');
+        }
+
+        // Handle comment deletion
+        if (isset($_POST['delComment'])) {
+            if ($this->commentService->deleteComment((int) $_POST['delComment'])) {
+                $this->tpl->setNotification($this->language->__('notifications.comment_deleted'), 'success');
+            } else {
+                $this->tpl->setNotification($this->language->__('notifications.comment_deleted_error'), 'error');
+            }
+
+            return Frontcontroller::redirect(BASE_URL.'/clients/showClient/'.$id.'#comment');
+        }
+
+        // Handle file upload
+        if (isset($_POST['upload'])) {
+            if (isset($_FILES['file']) && $_FILES['file']['tmp_name'] != '') {
+                $this->fileService->upload($_FILES, 'client', $id);
+                $this->tpl->setNotification($this->language->__('notifications.file_upload_success'), 'success', 'clientfile_uploaded');
+            } else {
+                $this->tpl->setNotification($this->language->__('notifications.file_upload_error'), 'error');
+            }
+        }
+
+        // Handle comment
+        if (isset($_POST['comment'])) {
+            if ($this->commentService->addCommentToLoadedEntity($_POST, 'client', (int) $id, $client)) {
+                $this->tpl->setNotification($this->language->__('notifications.comment_create_success'), 'success');
+            } else {
+                $this->tpl->setNotification($this->language->__('notifications.comment_create_error'), 'error');
+            }
+        }
+
+        // Handle client save
+        if (isset($_POST['save'])) {
+            $values = [
+                'id' => $id,
+                'name' => $_POST['name'] ?? '',
+                'street' => $_POST['street'] ?? '',
+                'zip' => $_POST['zip'] ?? '',
+                'city' => $_POST['city'] ?? '',
+                'state' => $_POST['state'] ?? '',
+                'country' => $_POST['country'] ?? '',
+                'phone' => $_POST['phone'] ?? '',
+                'internet' => $_POST['internet'] ?? '',
+                'email' => $_POST['email'] ?? '',
+            ];
+
+            try {
+                $this->clientService->updateClient($values);
+                $this->tpl->setNotification($this->language->__('notification.client_saved_successfully'), 'success');
+            } catch (MissingParameterException) {
+                $this->tpl->setNotification($this->language->__('notification.client_name_not_specified'), 'error');
+            }
+
+            $client = $values;
+        }
+
+        if (session('userdata.role') == 'admin') {
+            $this->tpl->assign('admin', true);
+        }
+
+        $this->tpl->assign('client', $client);
+
+        $pageData = $this->clientService->getClientPageData($id);
+        array_map([$this->tpl, 'assign'], array_keys($pageData), array_values($pageData));
+
+        return $this->tpl->display('clients.showClient');
+    }
+}

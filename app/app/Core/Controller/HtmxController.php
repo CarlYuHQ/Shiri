@@ -1,0 +1,158 @@
+<?php
+
+namespace Shiri\Core\Controller;
+
+use BadMethodCallException;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\Events\Htmx\HtmxEvent;
+use Shiri\Core\Events\Htmx\HtmxEvents;
+use Shiri\Core\Http\IncomingRequest;
+use Shiri\Core\Language;
+use Shiri\Core\UI\Template;
+use LogicException;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * HtmxController Class - Base class For all htmx controllers
+ *
+ * @method string|null run() The fallback method to be initialized.
+ */
+abstract class HtmxController
+{
+    use DispatchesEvents;
+
+    protected Response $response;
+
+    protected static string $view;
+
+    protected array $headers = [];
+
+    /**
+     * constructor - initialize private variables
+     *
+     * @param  IncomingRequest  $incomingRequest  The request to be initialized.
+     * @param  Template  $tpl  The template to be initialized.
+     *
+     * @throws BindingResolutionException
+     */
+    public function __construct(
+        /** @var IncomingRequest $incomingRequest */
+        protected IncomingRequest $incomingRequest,
+
+        /** @var Template $tpl */
+        public Template $tpl,
+
+        /** @var Template $tpl */
+        public Language $language,
+
+    ) {
+        self::dispatchEvent('begin');
+
+        $this->incomingRequest = $incomingRequest;
+        $this->tpl = $tpl;
+        $this->response = app()->make(Response::class);
+
+        // initialize
+        if (method_exists($this, 'init')) {
+            app()->call([$this, 'init']);
+        }
+
+        if (! isset(static::$view)) {
+            throw new LogicException('HTMX Controllers must include the "$view" static property');
+        }
+
+        self::dispatchEvent('end', $this);
+    }
+
+    /**
+     * Queue a client (HTMX) event on the HX-Trigger response header.
+     *
+     * @param  HtmxEvent|string  $eventName  An HtmxEvent enum case, an EmitsClientEvent class name
+     *                                       (TicketUpdated::class) or a raw event name.
+     */
+    public function setHTMXEvent(HtmxEvent|string $eventName): void
+    {
+        $this->headers['HX-Trigger'] ??= [];
+        $this->headers['HX-Trigger'][] = HtmxEvents::name($eventName);
+    }
+
+    /**
+     * Queue one or more client (HTMX) events on the HX-Trigger response header.
+     *
+     * Domain data events usually need no call here: dispatching an EmitsClientEvent domain event
+     * during an htmx request queues it automatically. Use this for UI commands (HtmxUiEvents) and
+     * for responses that should announce a change no domain event covers.
+     *
+     * @param  HtmxEvent|string  ...$events  HtmxEvent enum cases, EmitsClientEvent class names or raw names.
+     */
+    public function emit(HtmxEvent|string ...$events): void
+    {
+        foreach ($events as $event) {
+            $this->setHTMXEvent($event);
+        }
+    }
+
+    /**
+     * Gets the response
+     *
+     **/
+    public function getResponse($fragment): Response
+    {
+        $this->response = tap(
+            $this->tpl->displayFragment($this::$view, $fragment ?? ''),
+            function (Response $response): void {
+                // Merge queued HX-Trigger events from BOTH the controller and the template
+                // (set()ing each bag separately would let the second silently overwrite the
+                // first), expand legacy aliases, and emit the comma-separated list once.
+                $triggerEvents = array_merge(
+                    $this->headers['HX-Trigger'] ?? [],
+                    (array) ($this->tpl->getHeaders()['HX-Trigger'] ?? [])
+                );
+
+                foreach ([$this->headers, $this->tpl->getHeaders()] as $headerBag) {
+                    foreach ($headerBag as $key => $value) {
+                        if ($key === 'HX-Trigger') {
+                            continue;
+                        }
+                        $response->headers->set($key, is_array($value) ? implode(',', $value) : $value);
+                    }
+                }
+
+                if (! empty($triggerEvents)) {
+                    $response->headers->set('HX-Trigger', HtmxEvents::triggerHeader($triggerEvents));
+                }
+            },
+        );
+
+        return $this->response;
+    }
+
+    /**
+     * Execute an action on the controller.
+     *
+     * @param  string  $method
+     * @param  array  $parameters
+     * @return \Symfony\Component\HttpFoundation\Response
+     */
+    public function callAction($method, $parameters)
+    {
+        return $this->{$method}($parameters);
+    }
+
+    /**
+     * Handle calls to missing methods on the controller.
+     *
+     * @param  string  $method
+     * @param  array  $parameters
+     * @return mixed
+     *
+     * @throws \BadMethodCallException
+     */
+    public function __call($method, $parameters)
+    {
+        throw new BadMethodCallException(sprintf(
+            'Method %s::%s does not exist.', static::class, $method
+        ));
+    }
+}

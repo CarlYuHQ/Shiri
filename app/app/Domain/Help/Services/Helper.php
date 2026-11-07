@@ -1,0 +1,551 @@
+<?php
+
+namespace Shiri\Domain\Help\Services;
+
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Domain\Auth\Models\Roles;
+use Shiri\Domain\Setting\Repositories\Setting;
+
+class Helper
+{
+    use DispatchesEvents;
+
+    private $availableModals = [
+        'dashboard.show' => [
+            'id' => 'dashboard.show',
+            'template' => 'projectDashboard',
+            'tour' => 'dashboard',
+            'autoLoad' => true,
+        ],
+        'dashboard.home' => [
+            'id' => 'dashboard.home',
+            'template' => 'home',
+            'tour' => 'myWorkDashboard',
+            'autoLoad' => true,
+        ],
+        'tickets.showKanban' => [
+            'id' => 'tickets.showKanban',
+            'template' => 'kanban',
+            'tour' => '',
+            'autoLoad' => true,
+        ],
+        'tickets.roadmap' => [
+            'id' => 'tickets.roadmap',
+            'template' => 'roadmap',
+            'tour' => '',
+            'autoLoad' => true,
+        ],
+        'goalcanvas.dashboard' => [
+            'id' => 'goalcanvas.dashboard',
+            'template' => 'goals',
+            'tour' => '',
+            'autoLoad' => true,
+        ],
+        'leancanvas.showCanvas' => [
+            'id' => 'leancanvas.showCanvas',
+            'template' => 'fullLeanCanvas',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'leancanvas.simpleCanvas' => [
+            'id' => 'leancanvas.simpleCanvas',
+            'template' => 'simpleLeanCanvas',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'ideas.showBoards' => [
+            'id' => 'ideas.showBoards',
+            'template' => 'ideaBoard',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'ideas.advancedBoards' => [
+            'id' => 'ideas.advancedBoards',
+            'template' => 'advancedBoards',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'retroscanvas.showBoards' => [
+            'id' => 'retroscanvas.showBoards',
+            'template' => 'retroscanvas',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'timesheets.showMy' => [
+            'id' => 'timesheets.showMy',
+            'template' => 'mytimesheets',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'projects.newProject' => [
+            'id' => 'projects.newProject',
+            'template' => 'newProject',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'projects.showAll' => [
+            'id' => 'projects.showAll',
+            'template' => 'showProjects',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'clients.showAll' => [
+            'id' => 'clients.showAll',
+            'template' => 'showClients',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'blueprints.showBoards' => [
+            'id' => 'blueprints.showBoards',
+            'template' => 'blueprints',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+        'wiki.show' => [
+            'id' => 'wiki.show',
+            'template' => 'wiki',
+            'tour' => '',
+            'autoLoad' => false,
+        ],
+
+    ];
+
+    /**
+     * Constructor for the class.
+     * Initializes the availableModals property by dispatching the "addHelperModal" event.
+     *
+     * @return void
+     */
+    public function __construct(private Setting $settingsRepo)
+    {
+
+        $this->availableModals = self::dispatch_filter('addHelperModal', $this->availableModals);
+    }
+
+    /**
+     * Returns an array of all available helper modals.
+     *
+     * @return array The array of available helper modals.
+     */
+    public function getAllHelperModals(): array
+    {
+        return $this->availableModals;
+    }
+
+    /**
+     * Retrieves the corresponding helper modal for a given route.
+     *
+     * @param  string  $route  The route for which to retrieve the helper modal.
+     * @return array The helper modal associated with the given route. If not found, a 'notfound' template array is returned.
+     */
+    public function getHelperModalByRoute(string $route): array
+    {
+        return $this->availableModals[$route] ?? ['template' => 'notfound'];
+    }
+
+    /**
+     * Retrieves the first login steps.
+     *
+     * This method returns an array of steps that a user needs to follow during the first login.
+     *
+     * Each step consists of a template and a button label.
+     *
+     * @return array The first login steps.
+     */
+    public function getFirstLoginSteps(): array
+    {
+        $steps = [
+            0 => ['class' => "Shiri\Domain\Help\Services\FirstTaskStep", 'next' => 'end'],
+        ];
+
+        // make array of onboarding steps.
+        $steps = self::dispatch_filter('filterSteps', $steps);
+
+        return $steps;
+    }
+
+    /**
+     * Resolves which first-login onboarding step should be displayed.
+     *
+     * Given an optional requested step key (from the request), this returns
+     * the resolved step including its template and whether the onboarding flow
+     * has reached the final "end" step. When no valid step key is provided the
+     * first available step is used.
+     *
+     * @param  string|null  $requestedStep  The requested step key (e.g. a numeric index or "end").
+     * @return array{key: int|string, next: string|int|null, template: string|null, isEnd: bool} The resolved step information.
+     *
+     * @api
+     */
+    public function resolveFirstLoginStep(?string $requestedStep): array
+    {
+        if ($requestedStep === 'end') {
+            return [
+                'key' => 'end',
+                'next' => null,
+                'template' => 'help.firstLoginEnd',
+                'isEnd' => true,
+            ];
+        }
+
+        $allSteps = $this->getFirstLoginSteps();
+
+        $currentStepKey = collect($allSteps)->keys()->first();
+
+        if ($requestedStep !== null && isset($allSteps[$requestedStep])) {
+            $currentStepKey = (int) $requestedStep;
+        }
+
+        $currentStep = $allSteps[$currentStepKey];
+
+        /** @var \Shiri\Domain\Help\Contracts\OnboardingSteps $stepObject */
+        $stepObject = app()->make($currentStep['class']);
+
+        return [
+            'key' => $currentStepKey,
+            'next' => $currentStep['next'],
+            'template' => $stepObject->getTemplate(),
+            'isEnd' => false,
+        ];
+    }
+
+    /**
+     * Handles the submission of a first-login onboarding step.
+     *
+     * Resolves the current step from the submitted parameters, delegates handling
+     * to the step's class, and returns whether the step was valid along with the
+     * key of the step the user should be redirected to next.
+     *
+     * @param  array  $params  The submitted request parameters. Must contain a numeric "currentStep".
+     * @return array{valid: bool, next: string|int} Result of the step handling: "valid" indicates whether the
+     *                                              submitted step was recognized, "next" is the step key to navigate to.
+     *
+     * @api
+     */
+    public function handleFirstLoginStep(array $params): array
+    {
+        $allSteps = $this->getFirstLoginSteps();
+
+        if (
+            ! isset($params['currentStep'])
+            || ! is_numeric($params['currentStep'])
+            || ! isset($allSteps[$params['currentStep']])
+        ) {
+            return ['valid' => false, 'next' => ''];
+        }
+
+        $currentStep = $allSteps[$params['currentStep']];
+
+        /** @var \Shiri\Domain\Help\Contracts\OnboardingSteps $stepObject */
+        $stepObject = app()->make($currentStep['class']);
+
+        $result = $stepObject->handle($params);
+
+        if ($result) {
+            return ['valid' => true, 'next' => $currentStep['next']];
+        }
+
+        return ['valid' => true, 'next' => $params['currentStep']];
+    }
+
+    /**
+     * Marks an onboarding modal as seen for a given module and returns its template name.
+     *
+     * Ensures the per-session modal tracking store exists, sanitizes the module
+     * identifier, records that the modal has been shown once for this session, and
+     * returns the (sanitized) template name to render.
+     *
+     * @param  string  $module  The module identifier whose modal should be marked as seen.
+     * @return string The sanitized template name to render (without the "help." prefix).
+     *
+     * @api
+     */
+    public function markModalSeenForModule(string $module): string
+    {
+        $this->ensureModalSessionStore();
+
+        $template = htmlspecialchars($module);
+
+        if (! session()->exists('usersettings.modals.'.$template)) {
+            session(['usersettings.modals.'.$template => 1]);
+        }
+
+        return $template;
+    }
+
+    /**
+     * Marks an onboarding modal as seen for a given route and returns its template name.
+     *
+     * Sanitizes the route, resolves the matching helper modal, ensures the per-session
+     * modal tracking store exists, records that the modal has been shown once for this
+     * session, and returns the template name to render.
+     *
+     * @param  string  $route  The route identifier whose helper modal should be marked as seen.
+     * @return string The template name to render (without the "help." prefix).
+     *
+     * @api
+     */
+    public function markModalSeenForRoute(string $route): string
+    {
+        $this->ensureModalSessionStore();
+
+        $filteredRoute = htmlspecialchars($route);
+
+        $modal = $this->getHelperModalByRoute($filteredRoute);
+
+        if (! session()->exists('usersettings.modals.'.$modal['template'])) {
+            session(['usersettings.modals.'.$modal['template'] => 1]);
+        }
+
+        return $modal['template'];
+    }
+
+    /**
+     * Ensures the per-session modal tracking store exists.
+     *
+     * Initializes "usersettings.modals" to an empty array when it has not yet
+     * been set so that modals are only shown once per session.
+     */
+    private function ensureModalSessionStore(): void
+    {
+        if (! session()->exists('usersettings.modals')) {
+            session(['usersettings.modals' => []]);
+        }
+    }
+
+    /**
+     * Checks if this is the user's first login.
+     *
+     * NOTE: This is now a pure check with no side effects.
+     * Default project creation has been moved to ensureDefaultProject()
+     * which is called from the CurrentProject middleware, not from view composers.
+     *
+     * @param  int  $userId  The user ID to check
+     * @return bool True if this is the first login, false otherwise
+     */
+    public function isFirstLogin(int $userId): bool
+    {
+        $onboardingComplete = $this->settingsRepo->getSetting('user.'.$userId.'.firstLoginCompleted');
+
+        return ! isset($onboardingComplete) || $onboardingComplete === false;
+    }
+
+    /**
+     * Ensures the user has a default project.
+     * Creates one if the user has no current project set.
+     * Called from middleware (not from view composers) to avoid
+     * write operations during template rendering.
+     *
+     * @param  int  $userId  The user ID to check.
+     * @param  string  $role  The user's role for determining task content.
+     */
+    public function ensureDefaultProject(int $userId, string $role = 'editor'): void
+    {
+        $currentProject = session('currentProject');
+        if ($currentProject === null || $currentProject === 0 || $currentProject === '' || $currentProject === false) {
+            $this->createDefaultProject($userId, $role);
+        }
+    }
+
+    /**
+     * Marks the first login as completed for a user
+     *
+     * @param  int  $userId  The user ID to update
+     * @return bool Success status
+     */
+    public function markFirstLoginComplete(int $userId): bool
+    {
+
+        return $this->settingsRepo->saveSetting('user.'.$userId.'.firstLoginCompleted', true);
+
+    }
+
+    public function getOnboardingChecklist(int $userId): array|false
+    {
+
+        $checklist = $this->settingsRepo->getSetting('user.'.$userId.'.onboardingChecklist');
+        $checklist = json_decode($checklist, true);
+
+        //        if(!$checklist) {
+        //            return false;
+        //        }
+
+        // Checklist Debug
+        $checklist = [
+            'step1' => [
+                'completed' => true,
+                'label' => __('label.onboarding_create_first_task'),
+            ],
+            'step2' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_dashboard_tour'),
+            ],
+            'step3' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_personal_project'),
+                'url' => '',
+            ],
+            'step4' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_project'),
+                'url' => '',
+            ],
+            'step5' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_milestone'),
+                'url' => '',
+            ],
+            'step6' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_goal'),
+                'url' => '',
+            ],
+            'step7' => [
+                'completed' => false,
+                'label' => __('label.onboarding_checklist_comment'),
+                'url' => '',
+            ],
+
+        ];
+
+        return $checklist;
+
+    }
+
+    public function createDefaultProject(int $userId, string $role = 'editor')
+    {
+
+        // Create Project
+        $projectService = app()->make(\Shiri\Domain\Projects\Services\Projects::class);
+
+        $values = [
+            'name' => __('label.onboarding_default_project_name'),
+            'details' => __('text.onboarding_default_project_details'),
+            'clientId' => 0,
+            'hourBudget' => 0,
+            'assignedUsers' => [['id' => $userId, 'projectRole' => '']],
+            'dollarBudget' => 0,
+            'psettings' => 'restricted',
+            'type' => 'project',
+            'start' => null,
+            'end' => null,
+        ];
+
+        $projectId = $projectService->createProject($values);
+
+        // Remember which project is this user's onboarding project: the first-login wizard may
+        // rename/describe exactly this project without the company-wide projects.edit capability.
+        if ($projectId) {
+            $this->settingsRepo->saveSetting(
+                sprintf(\Shiri\Domain\Projects\Services\Projects::ONBOARDING_PROJECT_SETTING, $userId),
+                (int) $projectId
+            );
+        }
+
+        // Create Milestone
+        $ticketService = app()->make(\Shiri\Domain\Tickets\Services\Tickets::class);
+        $values = [
+            'headline' => '🚀 '.__('label.onboarding_milestone_getting_started'),
+            'projectId' => $projectId,
+            'editorId' => $userId,
+            'userId' => $userId,
+            'date' => dtHelper()->userNow()->formatDateTimeForDb(),
+            'editFrom' => dtHelper()->userNow()->formatDateTimeForDb(),
+            'editTo' => dtHelper()->userNow()->addDays(14)->formatDateTimeForDb(),
+            'tags' => '#124F7D',
+            'origin' => 'onboarding_seed',
+        ];
+        $milestoneId = $ticketService->quickAddMilestone($values);
+
+        // Create Tasks
+        $values = [
+            'headline' => '',
+            'description' => '',
+            'projectId' => $projectId,
+            'editorId' => $userId,
+            'userId' => $userId,
+            'dateToFinish' => dtHelper()->userNow()->addDays(3)->formatDateTimeForDb(),
+            'milestone' => $milestoneId,
+            // Generated for the user, not typed by them: analytics excludes it from "real work".
+            'origin' => 'onboarding_seed',
+        ];
+
+        $values['headline'] = '💬 '.__('label.onboarding_task_community_chat');
+        $values['description'] = __('text.onboarding_task_community_chat');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        if (Roles::isAtLeast($role, Roles::$manager)) {
+
+            $values['headline'] = '👥 '.__('label.onboarding_task_invite_team');
+            $values['description'] = sprintf(__('text.onboarding_task_invite_team'), BASE_URL.'/users/showAll');
+            $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+            $ticketService->quickAddTicket($values);
+        }
+
+        $values['headline'] = '🎯 '.__('label.onboarding_task_project_structure');
+        $values['description'] = __('text.onboarding_task_project_structure');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        $values['headline'] = '🎯 '.__('label.onboarding_task_create_goal');
+        $values['description'] = sprintf(__('text.onboarding_task_create_goal'), BASE_URL.'/goalcanvas/dashboard');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        $values['headline'] = '🚩 '.__('label.onboarding_task_create_milestone');
+        $values['description'] = sprintf(__('text.onboarding_task_create_milestone'), BASE_URL.'/tickets/roadmap/');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        $values['headline'] = '🗺️ '.__('label.onboarding_task_personal_project');
+        $values['description'] = sprintf(__('text.onboarding_task_personal_project'), BASE_URL.'/projects/changeCurrentProject/'.$projectId.'/');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        $values['headline'] = '🖼️ '.__('label.onboarding_task_complete_profile');
+        $values['description'] = sprintf(__('text.onboarding_task_complete_profile'), BASE_URL.'/users/editOwn/');
+        $values['dateToFinish'] = dtHelper()->userNow()->addDays(1)->formatDateForUser();
+        $ticketService->quickAddTicket($values);
+
+        $values['headline'] = '📌 '.__('label.onboarding_create_first_task');
+        $values['description'] = '';
+        $values['dateToFinish'] = dtHelper()->userNow();
+        $values['status'] = 0;
+        $ticketService->quickAddTicket($values);
+
+        // Create Goal. This is a SYSTEM-orchestrated onboarding write (running in the
+        // userSignUpSuccess listener while the user's project membership is still being set
+        // up), so it goes through the REPOSITORY directly — bypassing the CREATE-authorized
+        // Goalcanvas service methods, which would otherwise 403 the brand-new user. (Same
+        // landmine pattern as Wiki's default-notebook / Ideas' default-board bootstrap.)
+        $goalRepo = app()->make(\Shiri\Domain\Goalcanvas\Repositories\Goalcanvas::class);
+        $values = [
+            'title' => __('label.onboarding_goalboard_title'),
+            'author' => $userId,
+            'projectId' => $projectId,
+        ];
+        $currentCanvasId = $goalRepo->addCanvas($values);
+
+        $values = [
+            'description' => __('label.onboarding_goal_metric'), // Metric
+            'title' => __('label.onboarding_goal_objective'), // Objective
+            'box' => 'goal',
+            'author' => $userId,
+            'canvasId' => $currentCanvasId,
+            'milestoneId' => $milestoneId,
+            'startDate' => dtHelper()->userNow()->formatDateForUser(),
+            'endDate' => dtHelper()->userNow()->addMonths(2)->formatDateForUser(),
+            'metricType' => 'percent',
+            'assignedTo' => $userId,
+            'startValue' => '0',
+            'currentValue' => '0',
+            'endValue' => '80',
+        ];
+
+        $goalRepo->createGoal($values);
+
+        $projectService->changeCurrentSessionProject($projectId);
+
+    }
+}

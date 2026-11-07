@@ -1,0 +1,44 @@
+<?php
+
+namespace Shiri\Domain\Queue\Workers;
+
+use GuzzleHttp\Client;
+use GuzzleHttp\Exception\GuzzleException;
+use Shiri\Domain\Queue\Repositories\Queue;
+
+class HttpRequestWorker
+{
+    public function __construct(
+        private Queue $queue,
+        private Client $client
+    ) {}
+
+    public function handleQueue($messages)
+    {
+
+        foreach ($messages as $request) {
+
+            try {
+
+                $subjectArray = safe_unserialize($request['subject'], []);
+                $messageArray = safe_unserialize($request['message'], []);
+
+                $response = $this->client->request(
+                    $subjectArray['method'],
+                    $subjectArray['url'],
+                    $messageArray
+                );
+
+                $this->queue->deleteMessageInQueue($request['msghash']);
+
+            } catch (GuzzleException $e) {
+                report($e);
+
+                // Temp to clear out http requests
+                $this->queue->deleteMessageInQueue($request['msghash']);
+            }
+
+        }
+
+    }
+}

@@ -1,0 +1,542 @@
+<?php
+
+namespace Shiri\Core\Controller;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Contracts\Support\Responsable;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
+use Shiri\Core\Auth\Permissions\PermissionEnforcer;
+use Shiri\Core\Configuration\Environment;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\Http\HtmxRequest;
+use Shiri\Core\Http\IncomingRequest;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\Routing\Exception\RouteNotFoundException;
+
+/**
+ * Frontcontroller class
+ */
+class Frontcontroller
+{
+    use DispatchesEvents;
+
+    private IncomingRequest $incomingRequest;
+
+    protected $defaultRoute = 'calendar.showMyCalendar';   // 本机极简版：打开就是日历
+
+    protected Environment $config;
+
+    /**
+     * __construct - Set the rootpath of the server
+     *
+     * @return void
+     */
+    public function __construct(IncomingRequest $request, private PermissionEnforcer $permissionEnforcer)
+    {
+        $this->incomingRequest = $request;
+        $this->config = app(Environment::class);
+    }
+
+    /**
+     * run - executes the action depending on Request or firstAction
+     *
+     *
+     * @throws BindingResolutionException
+     */
+    public function dispatch(IncomingRequest $request): Response
+    {
+        $this->incomingRequest = $request;
+
+        [$moduleName, $controllerType, $controllerName, $method] = $this->parseRequestParts($request);
+
+        $this->dispatchEvent('execute_action_start', ['action' => $controllerName, 'module' => $moduleName]);
+
+        $routeParts = $this->getValidControllerCall($moduleName, $controllerName, $method, $controllerType);
+
+        // Setting default response code to 200, can be changed in controller
+        $this->setResponseCode(200);
+
+        $this->dispatchEvent('execute_action_end', ['action' => $controllerName, 'module' => $moduleName]);
+
+        // execute action
+        return $this->executeAction($routeParts['class'], $routeParts['method']);
+
+    }
+
+    public static function dispatch_request(IncomingRequest $request): Response
+    {
+        // Resolve through the container so constructor dependencies (e.g. PermissionEnforcer)
+        // are injected; dispatch() sets the active request explicitly.
+        $frontcontroller = app()->make(self::class);
+
+        return $frontcontroller->dispatch($request);
+    }
+
+    /**
+     * parseRequestParts - Parses the request segments and sets the necessary values in the IncomingRequest object.
+     *
+     * @param  IncomingRequest  $request  The incoming request object.
+     * @return array An array containing the controller name, action name, and method.
+     */
+    public function parseRequestParts(IncomingRequest $request)
+    {
+
+        $id = null;
+
+        $segments = $request->segments();
+        $method = strtolower($this->incomingRequest->getMethod());
+
+        if (count($segments) == 0) {
+            $segments = explode('.', $this->defaultRoute);
+        }
+
+        // First part is hx tells us this is a htmx controller request
+        $controllerType = 'Controllers';
+        if ($segments[0] == 'hx') {
+            array_shift($segments);
+            $controllerType = 'Hxcontrollers';
+        }
+
+        // If only one segment part was given the url is mean to be an index placeholder
+        if (count($segments) == 1) {
+            $segments[] = 'index';
+        }
+
+        // First segment is always module
+        $moduleName = $segments[0] ?? '';
+
+        // Second is action
+        $controllerName = $segments[1] ?? '';
+
+        // third is either id or method
+        // we can say that a numeric value always represents an id
+        if (isset($segments[2]) &&
+            (is_numeric($segments[2]) || Str::isUuid($segments[2]))
+        ) {
+            $id = $segments[2];
+        }
+
+        // If not numeric, it's quite likely this is a method name
+        // But it needs to be double checked.
+        if (isset($segments[2]) &&
+            ! (is_numeric($segments[2]) || Str::isUuid($segments[2]))
+        ) {
+            $method = $segments[2];
+        }
+
+        // If a third segment is set it is the id
+        if (isset($segments[3])) {
+            $id = $segments[3];
+            $method = $segments[2];
+            $request_parts = implode('.', array_slice($segments, 3));
+            $this->incomingRequest->query->set('request_parts', $request_parts);
+        }
+
+        $this->incomingRequest->query->set('act', $moduleName.'.'.$controllerName.'.'.$method);
+        $this->incomingRequest->setCurrentRoute($moduleName.'.'.$controllerName);
+
+        if ($id === '0' || ! empty($id)) {
+            $this->incomingRequest->query->set('id', $id);
+        }
+
+        // need to update all controllers to stop using global get and post methods.
+        // In the meantime we are setting it again.
+        $this->incomingRequest->overrideGlobals();
+
+        return [$moduleName, $controllerType, $controllerName, $method];
+
+    }
+
+    /**
+     * executeAction - includes the class in includes/modules by the Request
+     *
+     * @param  string  $controller  actionname.filename
+     *
+     * @throws BindingResolutionException
+     */
+    public function executeAction(string $controller, string $method): Response
+    {
+
+        $parameters = $this->incomingRequest->getRequestParams();
+
+        // Enforce #[RequiresPermission] on the resolved action before instantiating the
+        // controller. This is the single chokepoint for every convention-routed controller,
+        // regardless of which base class (if any) it extends.
+        $this->permissionEnforcer->enforce($controller, $method, $parameters);
+
+        $controllerClass = app()->make($controller);
+
+        $response = $controllerClass->callAction($method, $parameters);
+
+        // A controller may return a Symfony Response directly, a Responsable (e.g. an
+        // ImageResponse / JsonRpcResponse — now honored on this legacy dispatch path the same
+        // way Laravel's router and the ExceptionHandler already do), or a string fragment key
+        // handled by the controller's own getResponse().
+        return match (true) {
+            $response instanceof Response => $response,
+            $response instanceof Responsable => $response->toResponse($this->incomingRequest),
+            default => $controllerClass->getResponse($response),
+        };
+    }
+
+    /**
+     * Retrieves the type of controller based on the incoming request.
+     *
+     * @return string The type of controller. Possible values are 'Controllers' or 'Hxcontrollers'.
+     */
+    protected function getControllerType(): string
+    {
+
+        $controllerType = 'Controllers';
+        if (
+            ($this->incomingRequest instanceof HtmxRequest) &&
+            $this->incomingRequest->header('is-modal') == false &&
+            $this->incomingRequest->header('hx-boosted') == false
+        ) {
+            $controllerType = 'Hxcontrollers';
+        }
+
+        return $controllerType;
+    }
+
+    /**
+     * Retrieves the valid controller call based on the module name, action name, and method name.
+     *
+     * @param  string  $moduleName  The name of the module.
+     * @param  string  $actionName  The name of the action.
+     * @param  string  $methodName  The name of the method.
+     * @return array The valid controller call in the form of an associative array. The "class" key represents the class path of the controller,
+     *               and the "method" key represents the method name of the controller.
+     */
+    public function getValidControllerCall(string $moduleName, string $actionName, string $methodName, string $controllerType): array
+    {
+
+        // Must run before the route cache lookup: a cached POST resolution would otherwise be
+        // returned for a GET that names the verb in the URL.
+        $this->assertVerbSegmentMatchesRequestMethod($methodName);
+
+        $moduleName = Str::studly($moduleName);
+        $actionName = Str::studly($actionName);
+        $methodNameLower = Str::lower($methodName);
+        $routepath = $moduleName.'.'.$controllerType.'.'.$actionName;
+        $actionPath = $moduleName.'\\'.$controllerType.'\\'.$actionName;
+
+        if ($this->config->debug == false) {
+            $cachedRoute = Cache::store('installation')->get('routes.'.$routepath.'.'.$methodNameLower);
+
+            // Cached routes can outlive a deploy (e.g. a controller's run() replaced by get()/post()).
+            // Only trust the cache if the class and method still exist; otherwise drop it and re-resolve.
+            if (
+                is_array($cachedRoute)
+                && isset($cachedRoute['class'], $cachedRoute['method'])
+                && class_exists($cachedRoute['class'])
+                && method_exists($cachedRoute['class'], $cachedRoute['method'])
+            ) {
+                return $cachedRoute;
+            }
+
+            if ($cachedRoute !== null) {
+                Cache::store('installation')->forget('routes.'.$routepath.'.'.$methodNameLower);
+            }
+        }
+
+        $classPath = $this->getClassPath($controllerType, $moduleName, $actionName);
+
+        if ($classPath === false) {
+            throw new NotFoundHttpException("Can't find a valid controller for ".strip_tags($moduleName).'/'.strip_tags($actionName));
+        }
+
+        $classMethod = $this->getValidControllerMethod($classPath, $methodName);
+
+        Cache::store('installation')->set('routes.'.$routepath.'.'.($classMethod == 'run' ? $methodNameLower : $classMethod), ['class' => $classPath, 'method' => $classMethod]);
+
+        return ['class' => $classPath, 'method' => $classMethod];
+    }
+
+    /**
+     * Retrieves the class path of a controller based on the provided controller type, module name, and action name.
+     *
+     * @param  string  $controllerType  The type of controller. Possible values are 'Controllers' or 'Hxcontrollers'.
+     **/
+    public function getClassPath(string $controllerType, string $moduleName, string $actionName): string|false
+    {
+
+        $controllerNs = 'Domain';
+        $classname = 'Shiri\\Domain\\'.$moduleName.'\\'.$controllerType.'\\'.$actionName;
+
+        if (class_exists($classname)) {
+            return $classname;
+        }
+
+        // Check if hxcontroller exists
+        $classname = 'Shiri\\Domain\\'.$moduleName.'\\Hxcontrollers\\'.$actionName;
+
+        if (class_exists($classname)) {
+            return $classname;
+        }
+
+        $enabledPlugins = app()->make(\Shiri\Domain\Plugins\Services\Plugins::class)->getEnabledPlugins();
+
+        // The collection itself is as untrustworthy as its elements: the method is
+        // typed `mixed` and the beforeReturnCachedPlugins filter can return
+        // anything, including false/null. foreach over a non-iterable warns on
+        // EVERY route resolution (and is a TypeError under strict error handling),
+        // so degrade to "no enabled plugins" instead.
+        if (! is_iterable($enabledPlugins)) {
+            return false;
+        }
+
+        // $moduleName arrives here as Str::studly() of the URL segment, which
+        // FLATTENS internal capitals: "pgmpro" becomes "Pgmpro", never "PgmPro".
+        // Composer's PSR-4 prefix map is case-sensitive, so every controller in a
+        // plugin whose folder has an inner capital (PgmPro, StrategyPro) failed to
+        // resolve and 404'd. The enabled-plugin record already carries the real
+        // folder name, so match case-insensitively and then adopt that spelling
+        // for the class lookup.
+        $pluginFolder = null;
+        foreach ($enabledPlugins as $key => $obj) {
+            // getEnabledPlugins() is typed `mixed` and its payload goes through the
+            // beforeReturnCachedPlugins filter, so a plugin can reshape it — and a
+            // cached entry can come back as __PHP_Incomplete_Class when the model
+            // isn't loaded at unserialize time. Read the folder name defensively:
+            // this runs on every route resolution, so a fatal here would turn one
+            // bad cache entry into a 500 on every request instead of a clean 404.
+            // __PHP_Incomplete_Class must be excluded BEFORE any property access:
+            // even isset() on one raises "tried to access a property on an
+            // incomplete object", so testing for the property is not enough.
+            $folder = match (true) {
+                $obj instanceof \__PHP_Incomplete_Class => null,
+                is_object($obj) && isset($obj->foldername) => $obj->foldername,
+                is_array($obj) && isset($obj['foldername']) => $obj['foldername'],
+                default => null,
+            };
+
+            if (! is_string($folder) || strtolower($folder) !== strtolower($moduleName)) {
+                continue;
+            }
+
+            $pluginFolder = $folder;
+            break;
+        }
+
+        if ($pluginFolder === null) {
+            return false;
+        }
+
+        $classname = 'Shiri\\Plugins\\'.$pluginFolder.'\\'.$controllerType.'\\'.$actionName;
+        if (class_exists($classname)) {
+            return $classname;
+        }
+
+        $classname = 'Shiri\\Plugins\\'.$pluginFolder.'\\Hxcontrollers\\'.$actionName;
+        if (class_exists($classname)) {
+            return $classname;
+        }
+
+        return false;
+    }
+
+    /**
+     * Retrieves a valid controller method based on the given controller class and method.
+     *
+     * @param  string  $controllerClass  The fully qualified class name of the controller.
+     * @param  string  $method  The method name to check for validity.
+     * @return string The valid controller method name. If the given method is "head",
+     *                it will be converted to "get". If the given method exists in the controller
+     *                class, it will be returned. Otherwise, if the "run" method exists in the
+     *                controller class, it will be returned. If no valid method is found, a
+     *                RouteNotFoundException will be thrown.
+     *
+     * @throws RouteNotFoundException If no valid method is found for the given route.
+     */
+    public function getValidControllerMethod(string $controllerClass, string $method): string
+    {
+        $this->assertVerbSegmentMatchesRequestMethod($method);
+
+        $methodFormatted = Str::camel($method);
+        $httpMethod = Str::lower($this->incomingRequest->getMethod());
+
+        if (Str::lower($method) == 'head') {
+            $method = 'get';
+        }
+
+        // First check if the given method exists.
+        if (method_exists($controllerClass, $methodFormatted)) {
+
+            return $methodFormatted;
+            // Then check if the http method exists as verb
+        } elseif (method_exists($controllerClass, $httpMethod)) {
+
+            // If this was the case our first assumption around $method was wrong and $method is actually a
+            // id/slug. Let's set id to that slug.
+            $this->incomingRequest->query->set('id', $method);
+
+            return $httpMethod;
+            // Just for backwards compatibility, let's also check if run exists.
+        } elseif (method_exists($controllerClass, 'run')) {
+            return 'run';
+        }
+
+        throw new NotFoundHttpException("Can't find valid method for ".strip_tags($method).' in '.strip_tags($controllerClass));
+    }
+
+    /**
+     * Refuses a URL segment that names an HTTP verb other than the one actually used.
+     *
+     * `/module/action/{method}` lets the URL pick a controller method. Custom action names
+     * keep working, but a segment like `post` or `delete` must not run that handler on a
+     * GET request: browsers treat GET as safe (it is sent cross-site with SameSite=Lax
+     * cookies), so a state-changing handler reached that way could be triggered by a link.
+     *
+     * @param  string  $methodName  The method segment taken from the URL (or the request verb).
+     *
+     * @throws NotFoundHttpException When the segment is a verb that differs from the request method.
+     */
+    private function assertVerbSegmentMatchesRequestMethod(string $methodName): void
+    {
+        $httpVerbs = ['get', 'post', 'put', 'patch', 'delete'];
+        $requestedVerb = Str::lower($methodName);
+
+        if (! in_array($requestedVerb, $httpVerbs, true)) {
+            return;
+        }
+
+        $actualVerb = Str::lower($this->incomingRequest->getMethod());
+
+        // HEAD is answered by the GET handler.
+        if ($actualVerb === 'head') {
+            $actualVerb = 'get';
+        }
+
+        if ($requestedVerb === $actualVerb) {
+            return;
+        }
+
+        throw new NotFoundHttpException('Method '.strip_tags($methodName).' does not match the request method');
+    }
+
+    /**
+     * getActionName - split string to get actionName
+     *
+     * @throws BindingResolutionException
+     */
+    public static function getActionName(?string $completeName = null): string
+    {
+        $completeName ??= currentRoute();
+        $actionParts = explode('.', empty($completeName) ? currentRoute() : $completeName);
+
+        // If not action name was given, call index controller
+        if (count($actionParts) == 1) {
+            return 'index';
+        } elseif (count($actionParts) >= 2) {
+            return $actionParts[1];
+        }
+
+        return '';
+    }
+
+    /**
+     * Retrieves the method name based on the complete name of a route.
+     *
+     * @param  string|null  $completeName  The complete name of the route. Defaults to the current route if not provided.
+     * @return string The method name. If the route name consists of two parts (e.g. "controllers.index"), the method name will be the lowercase representation of the current request method
+     *. If the route name consists of three parts (e.g. "controllers.update"), the method name will be the second part of the route name. Otherwise, an empty string is returned.
+     *
+     * @deprecated
+     **/
+    public static function getMethodName(?string $completeName = null): string
+    {
+        $completeName ??= currentRoute();
+        $actionParts = explode('.', empty($completeName) ? currentRoute() : $completeName);
+
+        // If not action name was given, call index controller
+        if (count($actionParts) == 2) {
+            return strtolower(app('request')->getMethod());
+        } elseif (count($actionParts) == 3) {
+            return $actionParts[2];
+        }
+
+        return '';
+    }
+
+    /**
+     * getModuleName - split string to get modulename
+     *
+     * @throws BindingResolutionException
+     */
+    public static function getModuleName(?string $completeName = null): string
+    {
+        $completeName ??= currentRoute();
+        $actionParts = explode('.', empty($completeName) ? currentRoute() : $completeName);
+
+        return $actionParts[0];
+    }
+
+    /**
+     * redirect - redirects to a given url
+     */
+    public static function redirect(string $url, int $http_response_code = 303, $headers = []): RedirectResponse
+    {
+
+        if (app('request')->headers->get('is-modal')) {
+            Frontcontroller::redirectHtmx($url, $headers);
+        }
+
+        return new RedirectResponse(
+            trim(preg_replace('/\s\s+/', '', strip_tags($url))),
+            $http_response_code,
+            $headers
+        );
+    }
+
+    /**
+     * redirect - redirects an htmx page.
+     *
+     * @param  array  $headers
+     */
+    public static function redirectHtmx(string $url, $headers = []): Response
+    {
+        // modal redirect
+        if (Str::start($url, '#')) {
+            $hxCurrentUrl = app('request')->headers->get('hx-current-url');
+            $mainPageUrl = Str::before($hxCurrentUrl, '#');
+            $url = $mainPageUrl.''.$url;
+        }
+
+        $headers['HX-Redirect'] = $url;
+
+        // $headers["hx-push-url"] = $url;
+        // $headers["hx-replace-url"] = $url;
+        // $headers["HX-Refresh"] = true;
+
+        // this redirect is actually handled on the client side.
+        // We'll just return an empty response with a few headers
+        return new Response(
+            'redirecting...',
+            200, // Anything else than 200 will fail.
+        );
+    }
+
+    /**
+     * getCurrentRoute - gets current route
+     *
+     * @deprecated use request class to get current route
+     *
+     * @return string
+     */
+    public static function getCurrentRoute()
+    {
+        return app('request')->getCurrentRoute();
+    }
+
+    /**
+     * setResponseCode - sets the response code
+     */
+    public function setResponseCode(int $responseCode): void
+    {
+        http_response_code($responseCode);
+    }
+}

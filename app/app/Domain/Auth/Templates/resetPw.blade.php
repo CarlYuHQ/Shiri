@@ -1,0 +1,45 @@
+@extends($layout)
+@section('content')
+
+<x-global::layout.page-header>
+    {!! __('headlines.reset_password') !!}
+</x-global::layout.page-header>
+<div class="regcontent">
+    @dispatchEvent('afterRegcontentOpen')
+    <form id="resetPassword" action="" method="post">
+        @dispatchEvent('afterFormOpen')
+
+        {!! $tpl->displayInlineNotification() !!}
+
+        <p>{!! __('text.enter_new_password') !!}<br /><br /></p>
+
+        <div class="">
+            <x-global::forms.text-input type="password" autocomplete="off" name="password" id="password" placeholder="{{ __('input.placeholders.enter_new_password') }}" />
+            <span id="pwStrength" style="width:100%;"></span>
+        </div>
+        <div class=" ">
+            <x-global::forms.text-input type="password" autocomplete="off" name="password2" id="password2" placeholder="{{ __('input.placeholders.confirm_password') }}" />
+        </div>
+        <small>{!! __('label.passwordRequirements') !!}</small><br /><br />
+        <div class="">
+
+            @dispatchEvent('beforeSubmitButton')
+            <x-global::forms.button tag="input" inputType="submit" contentRole="primary" :labelText="__('buttons.reset_password')" name="resetPassword" />
+            <div class="forgotPwContainer">
+                <a href="{{ BASE_URL }}/" class="forgotPw">{!! __('links.back_to_login') !!}</a>
+            </div>
+        </div>
+        @dispatchEvent('beforeFormClose')
+    </form>
+    @dispatchEvent('beforeRegcontentClose')
+</div>
+
+@once
+@push('scripts')
+<script>
+    shiri.usersController.checkPWStrength('password');
+</script>
+@endpush
+@endonce
+
+@endsection

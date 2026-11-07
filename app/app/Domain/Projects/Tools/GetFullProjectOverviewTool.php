@@ -1,0 +1,242 @@
+<?php
+
+namespace Shiri\Domain\Projects\Tools;
+
+use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Mcp\Request;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\Server\Tool;
+use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
+use Shiri\Domain\Comments\Services\Comments;
+use Shiri\Domain\Projects\Services\Projects;
+use Shiri\Domain\Tickets\Services\Tickets;
+use Shiri\Domain\Timesheets\Services\Timesheets;
+
+/**
+ * Gets comprehensive project information in a single call.
+ */
+#[IsReadOnly]
+class GetFullProjectOverviewTool extends Tool
+{
+    public function __construct(
+        private Projects $projectService,
+        private Comments $commentsService,
+        private Tickets $ticketsService,
+    ) {}
+
+    /**
+     * @return array<string, \Illuminate\JsonSchema\Types\Type>
+     */
+    public function schema(JsonSchema $schema): array
+    {
+        return [
+            'projectId' => $schema->integer()
+                ->description('Project ID to get full overview for.')
+                ->required(),
+            'includeTimesheets' => $schema->boolean()
+                ->description('Whether to include timesheet data in the overview. Default false.'),
+            'dateFrom' => $schema->string()
+                ->description('Start date for timesheet data if included. ISO8601 format (example: 2024-04-30T15:00:00-04:00).'),
+            'dateTo' => $schema->string()
+                ->description('End date for timesheet data if included. ISO8601 format (example: 2024-04-30T15:00:00-04:00).'),
+        ];
+    }
+
+    public function name(): string
+    {
+        return 'getFullProjectOverview';
+    }
+
+    public function title(): string
+    {
+        return 'Get Full Project Overview';
+    }
+
+    public function description(): string
+    {
+        return 'Gets comprehensive project information in a single call, combining project details, progress, comments, and optionally timesheets.';
+    }
+
+    /**
+     * Handle the tool request.
+     */
+    public function handle(Request $request): Response
+    {
+        $arguments = $request->all();
+
+        $projectId = (int) ($arguments['projectId'] ?? 0);
+        $includeTimesheets = $arguments['includeTimesheets'] ?? false;
+        $dateFrom = ($arguments['dateFrom'] ?? '');
+        $dateTo = ($arguments['dateTo'] ?? '');
+
+        // This method consolidates what would normally be 3-4 separate tool calls
+        $response = "# Complete Project Overview\n\n";
+
+        try {
+            // Get project details (equivalent to getProject tool)
+            $project = $this->projectService->getProject($projectId);
+            if (! $project) {
+                return Response::error("Project with ID {$projectId} not found.");
+            }
+
+            $response .= "## Project Details\n";
+            $response .= "**Name:** {$project['name']}\n";
+            $response .= '**Client:** '.($project['clientName'] ?? 'No client')."\n";
+            $response .= "**Type:** {$project['type']}\n";
+            $response .= '**Status:** '.($project['state'] ?? 'Not set')."\n";
+            $response .= '**Start Date:** '.($project['start'] ?? 'Not set')."\n";
+            $response .= '**End Date:** '.($project['end'] ?? 'Not set')."\n";
+            $response .= "**Description:** {$project['details']}\n\n";
+
+            // Get project progress (equivalent to getProjectProgress tool)
+            $progress = $this->projectService->getProjectProgress($projectId);
+
+            $response .= "## Progress Overview\n";
+            $response .= '**Overall Progress:** '.($progress['percent'] ?? '0')."%\n";
+            $response .= '**RAG Status:** '.$this->formatRagStatus($progress['ragStatus'] ?? '')."\n";
+            $response .= '**Estimated Completion:** '.($progress['estimatedCompletionDate'] ?? 'Not calculated')."\n";
+            $response .= '**Planned Completion:** '.($progress['plannedCompletionDate'] ?? 'Not set')."\n\n";
+
+            // Get recent status updates/comments (equivalent to getAllProjectComments tool)
+            $comments = $this->commentsService->getComments('project', $projectId);
+
+            $response .= "## Recent Status Updates\n";
+            if (empty($comments)) {
+                $response .= "*No status updates found.*\n\n";
+            } else {
+                foreach ($comments as $comment) {
+                    $status = $this->formatRagStatus($comment['status'] ?? '');
+                    $response .= "**{$comment['date']}** - {$status}\n";
+                    $response .= "*{$comment['firstname']} {$comment['lastname']}:* {$comment['text']}\n\n";
+                }
+            }
+
+            // Optionally include timesheet data
+            if ($includeTimesheets) {
+                $response .= "## Time Tracking Summary\n";
+
+                // Set default date range if not provided
+                if (empty($dateFrom)) {
+                    $dateFrom = dtHelper()->userNow()->format('Y-m-01'); // First day of the user's current month
+                }
+                if (empty($dateTo)) {
+                    $dateTo = dtHelper()->userNow()->format('Y-m-d'); // The user's today
+                }
+
+                try {
+                    $timesheets = app(Timesheets::class)->getAll(
+                        dateFrom: dtHelper()->parseUserDateTime($dateFrom)->startOfDay(),
+                        dateTo: dtHelper()->parseUserDateTime($dateTo)->endOfDay(),
+                        projectId: $projectId
+                    );
+
+                    if (empty($timesheets)) {
+                        $response .= "*No timesheet entries found for the specified period.*\n\n";
+                    } else {
+                        $totalHours = 0;
+                        $userHours = [];
+
+                        foreach ($timesheets as $entry) {
+                            $hours = floatval($entry['hours'] ?? 0);
+                            $totalHours += $hours;
+                            $user = $entry['firstname'].' '.$entry['lastname'];
+                            $userHours[$user] = ($userHours[$user] ?? 0) + $hours;
+                        }
+
+                        $response .= "**Total Hours Logged:** {$totalHours}h\n";
+                        $response .= "**Period:** {$dateFrom} to {$dateTo}\n";
+                        $response .= "**Team Breakdown:**\n";
+                        foreach ($userHours as $user => $hours) {
+                            $response .= "- {$user}: {$hours}h\n";
+                        }
+                        $response .= "\n";
+                    }
+                } catch (\Exception $e) {
+                    $response .= "*Could not retrieve timesheet data.*\n\n";
+                }
+            }
+
+            // Add quick task summary
+            $response .= "## Task Summary\n";
+            try {
+                $allTasks = $this->ticketsService->getAll(['currentProject' => $projectId], 100);
+                $taskStats = $this->calculateTaskStats($allTasks);
+
+                $response .= "**Total Tasks:** {$taskStats['total']}\n";
+                $response .= "**Completed:** {$taskStats['completed']} ({$taskStats['completedPercent']}%)\n";
+                $response .= "**In Progress:** {$taskStats['inProgress']}\n";
+                $response .= "**Not Started:** {$taskStats['notStarted']}\n";
+                $response .= "**Overdue:** {$taskStats['overdue']}\n\n";
+
+            } catch (\Exception $e) {
+                $response .= "*Could not retrieve task statistics.*\n\n";
+            }
+
+            return Response::text($response);
+
+        } catch (\Exception $e) {
+            return Response::error('Error retrieving project overview: '.$e->getMessage());
+        }
+    }
+
+    /**
+     * Calculate task statistics from a list of tasks.
+     *
+     * @param  array  $tasks  Array of task data.
+     * @return array<string, int|float> Computed statistics.
+     */
+    private function calculateTaskStats(array $tasks): array
+    {
+        $stats = [
+            'total' => count($tasks),
+            'completed' => 0,
+            'inProgress' => 0,
+            'notStarted' => 0,
+            'overdue' => 0,
+            'completedPercent' => 0,
+        ];
+
+        $now = new \DateTime;
+
+        foreach ($tasks as $task) {
+            $status = $task['status'] ?? '';
+            $dueDate = $task['dateToFinish'] ?? '';
+
+            // Count by status type
+            if (in_array($status, ['done', 'closed', 'completed'])) {
+                $stats['completed']++;
+            } elseif (in_array($status, ['inprogress', 'working', 'development'])) {
+                $stats['inProgress']++;
+            } else {
+                $stats['notStarted']++;
+            }
+
+            // Check for overdue tasks
+            if (! empty($dueDate) && ! in_array($status, ['done', 'closed', 'completed'])) {
+                $due = new \DateTime($dueDate);
+                if ($due < $now) {
+                    $stats['overdue']++;
+                }
+            }
+        }
+
+        if ($stats['total'] > 0) {
+            $stats['completedPercent'] = round(($stats['completed'] / $stats['total']) * 100, 1);
+        }
+
+        return $stats;
+    }
+
+    /**
+     * Format RAG status with appropriate label.
+     */
+    private function formatRagStatus(string $status): string
+    {
+        return match (strtolower($status)) {
+            'green' => 'Green (On Track)',
+            'yellow' => 'Yellow (At Risk)',
+            'red' => 'Red (Critical)',
+            default => $status ?: 'Not Set'
+        };
+    }
+}

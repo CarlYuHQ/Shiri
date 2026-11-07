@@ -1,0 +1,358 @@
+<?php
+
+namespace Shiri\Domain\Files\Repositories;
+
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Database\ConnectionInterface;
+use Shiri\Core\Db\Db as DbCore;
+use Shiri\Core\Files\Contracts\FileManagerInterface;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
+
+class Files
+{
+    public array $adminModules = ['project' => 'Projects', 'ticket' => 'Tickets', 'client' => 'Clients', 'lead' => 'Lead', 'private' => 'General']; // 'user'=>'Users',
+
+    public array $userModules = ['project' => 'Projects', 'ticket' => 'Tickets', 'private' => 'General'];
+
+    private ConnectionInterface $db;
+
+    private FileManagerInterface $fileManager;
+
+    public function __construct(DbCore $db, FileManagerInterface $fileManager)
+    {
+        $this->db = $db->getConnection();
+        $this->fileManager = $fileManager;
+    }
+
+    public function addFile(array $values, string $module): false|string
+    {
+        $id = $this->db->table('zp_file')->insertGetId([
+            'encName' => $values['encName'],
+            'realName' => $values['realName'],
+            'extension' => $values['extension'],
+            'module' => strtolower(trim($module)),
+            'moduleId' => $values['moduleId'],
+            'userId' => $values['userId'],
+            'date' => dtHelper()->dbNow()->formatDateTimeForDb(),
+        ]);
+
+        return (string) $id;
+    }
+
+    public function getFile(int $id): array|false
+    {
+        $result = $this->db->table('zp_file as file')
+            ->select(
+                'file.id',
+                'file.extension',
+                'file.realName',
+                'file.encName',
+                'file.date',
+                'file.module',
+                'file.moduleId',
+                'file.userId',
+                'user.firstname',
+                'user.lastname'
+            )
+            ->join('zp_user as user', 'file.userId', '=', 'user.id')
+            ->where('file.id', $id)
+            ->first();
+
+        return $result ? (array) $result : false;
+    }
+
+    /**
+     * Retrieves a file record by its encoded name.
+     *
+     * @param  string  $encName  The encoded (hashed) filename without extension.
+     * @return array|false The file record as an associative array, or false if not found.
+     */
+    public function getFileByEncName(string $encName): array|false
+    {
+        $result = $this->db->table('zp_file as file')
+            ->select(
+                'file.id',
+                'file.extension',
+                'file.realName',
+                'file.encName',
+                'file.date',
+                'file.module',
+                'file.moduleId',
+                'file.userId'
+            )
+            ->where('file.encName', $encName)
+            ->first();
+
+        return $result ? (array) $result : false;
+    }
+
+    /**
+     * Resolves the owning project id for a file record based on its module type.
+     *
+     * For 'project' module files the moduleId is the project id directly.
+     * For 'ticket' module files the owning ticket is looked up to find its project.
+     * For 'wiki' module files the moduleId is a wiki article; its board's project is returned.
+     * All other module types have no project context and return null. The module name is
+     * compared case-insensitively so an odd-cased stored module still resolves.
+     *
+     * @param  array  $fileRecord  The file record as returned by getFileByEncName().
+     * @return int|null The owning project id, or null when no project context applies.
+     */
+    public function getProjectIdForFile(array $fileRecord): ?int
+    {
+        $module = strtolower(trim((string) ($fileRecord['module'] ?? '')));
+        $moduleId = (int) ($fileRecord['moduleId'] ?? 0);
+
+        if ($moduleId <= 0) {
+            return null;
+        }
+
+        if ($module === 'project') {
+            return $moduleId;
+        }
+
+        if ($module === 'ticket') {
+            $ticket = $this->db->table('zp_tickets')
+                ->select('projectId')
+                ->where('id', $moduleId)
+                ->first();
+
+            if ($ticket) {
+                return (int) $ticket->projectId;
+            }
+        }
+
+        if ($module === 'wiki') {
+            return $this->getProjectIdForWikiArticle($moduleId);
+        }
+
+        return null;
+    }
+
+    /**
+     * Resolves the project a wiki article belongs to.
+     *
+     * zp_canvas_items is shared by every canvas type, so the row must be an article ('article'
+     * box) on a wiki board; any other id resolves to null (fail closed).
+     *
+     * @param  int  $articleId  The wiki article id (zp_canvas_items.id).
+     * @return int|null The article's project id, or null when it is not a wiki article.
+     */
+    public function getProjectIdForWikiArticle(int $articleId): ?int
+    {
+        if ($articleId <= 0) {
+            return null;
+        }
+
+        $article = $this->db->table('zp_canvas_items')
+            ->join('zp_canvas', 'zp_canvas.id', '=', 'zp_canvas_items.canvasId')
+            ->select('zp_canvas.projectId')
+            ->where('zp_canvas_items.id', $articleId)
+            ->where('zp_canvas_items.box', 'article')
+            ->where('zp_canvas.type', 'wiki')
+            ->first();
+
+        return $article ? (int) $article->projectId : null;
+    }
+
+    public function getFiles(int $userId = 0): false|array
+    {
+        $query = $this->db->table('zp_file as file')
+            ->select(
+                'file.id',
+                'file.moduleId',
+                'file.extension',
+                'file.realName',
+                'file.encName',
+                'file.date',
+                'file.module',
+                'user.firstname',
+                'user.lastname'
+            )
+            ->join('zp_user as user', 'file.userId', '=', 'user.id');
+
+        if ($userId > 0) {
+            $query->where('file.userId', $userId);
+        }
+
+        $results = $query->orderBy('file.module')
+            ->orderBy('file.moduleId')
+            ->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    public function getFolders(string $module): array
+    {
+        $folders = [];
+        $files = $this->getFiles(session('userdata.id'));
+
+        $table = match ($module) {
+            'ticket' => 'zp_tickets',
+            'client' => 'zp_clients',
+            'project' => 'zp_projects',
+            'lead' => 'zp_lead',
+            default => 'zp_tickets',
+        };
+
+        $titleColumn = match ($module) {
+            'ticket' => 'headline',
+            'client' => 'name',
+            'project' => 'name',
+            'lead' => 'name',
+            default => 'headline',
+        };
+
+        $ids = [];
+        foreach ($files as $file) {
+            if (! isset($ids[$file['moduleId']])) {
+                $result = $this->db->table($table)
+                    ->select("{$titleColumn} as title", 'id')
+                    ->where('id', $file['moduleId'])
+                    ->limit(1)
+                    ->first();
+
+                if ($result) {
+                    $folders[] = (array) $result;
+                }
+                $ids[$file['moduleId']] = true;
+            }
+        }
+
+        return $folders;
+    }
+
+    public function getFilesByModule(string $module = '', ?int $moduleId = null, ?int $userId = 0): false|array
+    {
+        $query = $this->db->table('zp_file as file')
+            ->select(
+                'file.id',
+                'file.extension',
+                'file.realName',
+                'file.encName',
+                'file.date',
+                'file.module',
+                'file.moduleId',
+                'user.firstname',
+                'user.lastname',
+                'user.id AS userId'
+            )
+            ->addSelect('file.date AS rawDate')
+            ->join('zp_user as user', 'file.userId', '=', 'user.id');
+
+        $module = strtolower(trim($module));
+        if ($module !== '') {
+            $query->where('file.module', $module);
+        } else {
+            $query->where('file.module', '<>', '');
+        }
+
+        if ($moduleId !== null) {
+            $query->where('file.moduleId', $moduleId);
+        }
+
+        if ($userId > 0) {
+            $query->where('file.userId', $userId);
+        }
+
+        $results = $query->get();
+
+        return array_map(fn ($item) => (array) $item, $results->toArray());
+    }
+
+    public function deleteFile(int $id): bool
+    {
+        $result = $this->db->table('zp_file')
+            ->select('encName', 'extension')
+            ->where('id', $id)
+            ->first();
+
+        if ($result && isset($result->encName) && isset($result->extension)) {
+            // Use FileManager to delete the file
+            $fileName = $result->encName.'.'.$result->extension;
+
+            // Delete file from default storage
+            $this->fileManager->deleteFile($fileName, 'default');
+        }
+
+        return $this->db->table('zp_file')
+            ->where('id', $id)
+            ->delete() > 0;
+    }
+
+    /**
+     * @return array|false
+     *
+     * @throws BindingResolutionException
+     */
+    public function upload(array $file, string $module, int $moduleId): false|string|array
+    {
+        // Clean module mess
+        $module = strtolower(trim($module));
+        if ($module === 'projects') {
+            $module = 'project';
+        }
+        if ($module === 'tickets') {
+            $module = 'ticket';
+        }
+
+        try {
+            $uploadedFile = $file['file'];
+            $path = $uploadedFile['name'];
+            $ext = pathinfo($path, PATHINFO_EXTENSION);
+            $realName = str_replace('.'.$ext, '', $uploadedFile['name']);
+
+            // Just something unique to avoid collision in s3 (each customer has their own folder)
+            $newname = md5(session('userdata.id').time());
+
+            // Create a UploadedFile instance
+            $symfonyFile = new UploadedFile(
+                $uploadedFile['tmp_name'],
+                $uploadedFile['name'],
+                $uploadedFile['type'],
+                $uploadedFile['error'],
+                true
+            );
+
+            // Use FileManager to upload the file.
+            // FIXME(phpstan-l2): the old call passed ($symfonyFile, $newname, false) but
+            // upload() is (UploadedFile $file, $disk = 'default') — so $newname was being used
+            // as the DISK name (would fail disk lookup) and `false` was ignored. upload() now
+            // computes the stored name itself; the $values below still use the caller's own
+            // $newname/$realName/$ext, which may not match the actually-stored file. Review.
+            $result = $this->fileManager->upload($symfonyFile);
+
+            if ($result !== false) {
+                $values = [
+                    'encName' => $newname,
+                    'realName' => $realName,
+                    'extension' => $ext,
+                    'moduleId' => $moduleId,
+                    'userId' => session('userdata.id'),
+                    'module' => $module,
+                    'fileId' => '',
+                ];
+
+                $fileAddResults = $this->addFile($values, $module);
+
+                if ($fileAddResults) {
+                    $values['fileId'] = $fileAddResults;
+
+                    return $values;
+                }
+            }
+
+            return false;
+        } catch (\Exception $e) {
+            report($e);
+
+            return $e->getMessage();
+        }
+    }
+
+    public function uploadCloud(string $name, string $url, string $module, int $moduleId): void
+    {
+
+        // Add cloud stuff here.
+    }
+}

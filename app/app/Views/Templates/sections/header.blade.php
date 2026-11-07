@@ -1,0 +1,182 @@
+<title>{{ \Shiri\Domain\Calendar\Support\Lang::t('app.name') }}</title>
+<link rel="icon" type="image/svg+xml" href="{{ BASE_URL }}/dist/img/shiri-mark.svg">
+
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<meta name="requestId" content="{{ \Illuminate\Support\Str::random(4) }}">
+<meta name="description" content="{{ $sitename }}">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-touch-fullscreen" content="yes">
+<meta name="theme-color" content="{{ $primaryColor }}">
+<meta name="color-scheme" content="{{ $themeColorMode }}">
+<meta name="theme" content="{{ $theme }}">
+<meta name="identifier-URL" content="{!! BASE_URL !!}">
+<meta name="shiri-version" content="{{ $version }}">
+<meta name="soft-reload" content="{{ $softReload ? 'true' : 'false' }}">
+
+@dispatchEvent('afterMetaTags')
+{{-- 资源版本用文件修改时间：改完样式/脚本立刻生效，不用手动改 ?v=，
+     也避免 WebView 拿旧 CSS 配新 HTML（7 列网格塌成一列就是这么来的）。 --}}
+@php
+    $ltV = static function (string $p): int {
+        $f = APP_ROOT.'/public'.$p;
+        return is_file($f) ? (int) filemtime($f) : 1;
+    };
+@endphp
+
+<link rel="shortcut icon" href="{!! BASE_URL !!}/dist/images/favicon.png"/>
+<link rel="apple-touch-icon" href="{!! BASE_URL !!}/dist/images/apple-touch-icon.png">
+
+@php
+    // Cache-buster: the filenames only change per app version, so rebuilds of
+    // the SAME version were served stale from browser cache (no query hash in
+    // the mix manifest — core mix does not version() the css). The bundle's
+    // mtime changes on every build, which busts exactly when needed.
+    $mainCssPath = APP_ROOT.'/public/dist/css/main.'.$version.'.min.css';
+    $cssBust = is_file($mainCssPath) ? filemtime($mainCssPath) : $version;
+@endphp
+<link rel="stylesheet" href="{!! BASE_URL !!}/dist/css/main.{!! $version !!}.min.css?v={!! $cssBust !!}"/>
+<link rel="stylesheet" href="{!! BASE_URL !!}/dist/css/app.{!! $version !!}.min.css?v={!! $cssBust !!}"/>
+@if($tpl->needsComponent('tiptap'))
+<link rel="stylesheet" href="{!! BASE_URL !!}/dist/css/tiptap-editor.{!! $version !!}.min.css?v={!! $cssBust !!}"/>
+<link rel="stylesheet" href="{!! BASE_URL !!}/dist/css/katex.min.css?v={!! $cssBust !!}"/>
+@endif
+{{-- 本机极简主题：放在整站 CSS 之后，免得被覆盖（见 public/dist/css/shiri-base.css） --}}
+<link rel="stylesheet" href="{!! BASE_URL !!}/dist/css/shiri-base.css?v={{ $ltV('/dist/css/shiri-base.css') }}"/>
+
+@dispatchEvent('afterLinkTags')
+
+<script src="{!! BASE_URL !!}/api/i18n?v={!! $version !!}"></script>
+
+<script src="{!! BASE_URL !!}/dist/js/compiled-htmx.{!! $version !!}.min.js"></script>
+<script src="{!! BASE_URL !!}/dist/js/compiled-htmx-extensions.{!! $version !!}.min.js"></script>
+
+<!-- libs -->
+<script src="{!! BASE_URL !!}/dist/js/compiled-frameworks.{!! $version !!}.min.js"></script>
+<script src="{!! BASE_URL !!}/dist/js/compiled-framework-plugins.{!! $version !!}.min.js"></script>
+<script src="{!! BASE_URL !!}/dist/js/compiled-global-component.{!! $version !!}.min.js"></script>
+{{-- Feature-component libraries are leaf bundles used only inside controller
+     functions that run on/after DOMContentLoaded (e.g. initCalendar()), never at
+     module-load. Deferring them keeps these heavy bundles (the tiptap editor alone
+     is ~6.8MB) from blocking first render; deferred scripts still execute before
+     DOMContentLoaded, so the init handlers find them ready. --}}
+@if($tpl->needsComponent('calendar'))
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-calendar-component.{!! $version !!}.min.js"></script>
+@endif
+@if($tpl->needsComponent('table'))
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-table-component.{!! $version !!}.min.js"></script>
+@endif
+@if($tpl->needsComponent('tiptap'))
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-tiptap-toolbar.{!! $version !!}.min.js"></script>
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-tiptap-editor.{!! $version !!}.min.js"></script>
+@endif
+@if($tpl->needsComponent('gantt'))
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-gantt-component.{!! $version !!}.min.js"></script>
+@endif
+@if($tpl->needsComponent('chart'))
+<script defer src="{!! BASE_URL !!}/dist/js/compiled-chart-component.{!! $version !!}.min.js"></script>
+@endif
+
+@dispatchEvent('afterScriptLibTags')
+
+<!-- app -->
+<script src="{!! BASE_URL !!}/dist/js/compiled-app.{!! $version !!}.min.js"></script>
+@dispatchEvent('afterMainScriptTag')
+
+<!--
+//For future file based ref js loading
+<script src="{!! BASE_URL !!}/dist/js/{{ ucwords(\Shiri\Core\Controller\Frontcontroller::getModuleName()) }}/Js/{{ \Shiri\Core\Controller\Frontcontroller::getModuleName() }}Controller.js"></script>
+-->
+
+<!-- theme & custom -->
+{{-- Theme js/css are optional: Theme::getAssetPath() returns FALSE when the
+     file doesn't exist (the default theme ships no js at all). Rendering that
+     as src=""/href="" makes the browser re-request the current page and try to
+     execute the HTML as a script ("Refused to execute script ... MIME type
+     ('text/html')"), so skip missing assets entirely. --}}
+@foreach ($themeScripts as $script)
+    @if(! empty($script))
+        <script src="{!! $script !!}"></script>
+    @endif
+@endforeach
+
+@foreach ($themeStyles as $style)
+    @if(! empty($style['url']))
+        <link rel="stylesheet" @isset($style['id']) id="{{{ $style['id'] }}}" @endisset href="{!! $style['url'] !!}"/>
+    @endif
+@endforeach
+
+@dispatchEvent('afterScriptsAndStyles')
+
+<!-- Replace main theme colors -->
+@php
+    // The nav bar sets white controls on the accent gradient. A light accent is
+    // a mid-tone that fails WCAG AA for white text; detect that per-theme and
+    // enable a dark scrim only then, so dark-accent themes stay fully vivid.
+    $navNeedsScrim = false;
+    foreach ($accents as $accentColor) {
+        // No usable accent value here — nothing to reason about, skip.
+        if ($accentColor === false || $accentColor === null || $accentColor === '') {
+            continue;
+        }
+        // A real accent we can't parse as 6-digit hex (e.g. rgb()/hsl()/named
+        // colors): we can't measure its luminance, so fail closed and enable the
+        // scrim to protect white nav-text contrast rather than assuming it's safe.
+        if (! is_string($accentColor) || ! preg_match('/^#?([0-9a-fA-F]{6})$/', $accentColor, $accentHex)) {
+            $navNeedsScrim = true;
+            break;
+        }
+        [$ar, $ag, $ab] = sscanf($accentHex[1], '%02x%02x%02x');
+        $linChannel = static fn ($v) => ($v /= 255) <= 0.03928 ? $v / 12.92 : (($v + 0.055) / 1.055) ** 2.4;
+        $accentLum = 0.2126 * $linChannel($ar) + 0.7152 * $linChannel($ag) + 0.0722 * $linChannel($ab);
+        if (1.05 / ($accentLum + 0.05) < 4.5) { // white-on-accent below AA
+            $navNeedsScrim = true;
+            break;
+        }
+    }
+
+    // Primary buttons put a white label on the first accent. Where that is below AA and dark
+    // text reads better (light accents, e.g. Forest in dark mode), the label turns dark.
+    $mainActionLabelColor = null;
+    if (is_string($accents[0] ?? null) && preg_match('/^#?([0-9a-fA-F]{6})$/', $accents[0], $primaryHex)) {
+        [$pr, $pg, $pb] = sscanf($primaryHex[1], '%02x%02x%02x');
+        $linChannel = static fn ($v) => ($v /= 255) <= 0.03928 ? $v / 12.92 : (($v + 0.055) / 1.055) ** 2.4;
+        $primaryLum = 0.2126 * $linChannel($pr) + 0.7152 * $linChannel($pg) + 0.0722 * $linChannel($pb);
+        $whiteLabelContrast = 1.05 / ($primaryLum + 0.05);
+        $darkLabelContrast = ($primaryLum + 0.05) / (0.0103 + 0.05); // #1a1a1a
+        if ($whiteLabelContrast < 4.5 && $darkLabelContrast > $whiteLabelContrast) {
+            $mainActionLabelColor = '#1a1a1a';
+        }
+    }
+@endphp
+<style id="colorSchemeSetter">
+    :root { --nav-scrim: {{ $navNeedsScrim ? '0.22' : '0' }}; }
+    @if($mainActionLabelColor)
+        :root { --main-action-label-color: {{ $mainActionLabelColor }}; }
+    @endif
+    @foreach ($accents as $accent)
+        @if($accent !== false)
+            :root {
+                --accent{{ $loop->iteration }}: {{{ $accent }}};
+            }
+        @endif
+    @endforeach
+</style>
+
+<style id="fontStyleSetter">
+    :root {
+        --primary-font-family: '{{{ $themeFont }}}', 'Helvetica Neue', Helvetica, sans-serif;
+    }
+</style>
+
+
+@include('global::sections.backgroundStyle')
+
+
+@dispatchEvent('afterThemeColors')
+
+
+<script>
+    window.shiri.currentProject = '{{ session("currentProject") }}';
+</script>

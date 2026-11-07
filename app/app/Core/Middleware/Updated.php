@@ -1,0 +1,108 @@
+<?php
+
+namespace Shiri\Core\Middleware;
+
+use Closure;
+use Shiri\Core\Configuration\AppSettings;
+use Shiri\Core\Controller\Frontcontroller;
+use Shiri\Core\Events\DispatchesEvents;
+use Shiri\Core\Http\IncomingRequest;
+use Shiri\Domain\Setting\Repositories\Setting as SettingRepository;
+use Symfony\Component\HttpFoundation\Response;
+
+class Updated
+{
+    use DispatchesEvents;
+
+    /**
+     * Check if Shiri is installed
+     *
+     * @param  \Closure(IncomingRequest): Response  $next
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     **/
+    public function handle(IncomingRequest $request, Closure $next): Response
+    {
+        // For HTMX and API requests, trust the session -- DB version can't change mid-session.
+        if (session('isUpdated') && ($request->isHtmxRequest() || $request->isApiOrCronRequest())) {
+            return $next($request);
+        }
+
+        $cachedDbVersion = session('dbVersion');
+        $dbVersion = $cachedDbVersion ?? app()->make(SettingRepository::class)->getSetting('db-version');
+        $settingsDbVersion = app()->make(AppSettings::class)->dbVersion;
+
+        if ($dbVersion !== false) {
+            // Setting dbVersion only if there is one in the db
+            // Otherwise leave dbVersion unset so we can recheck every time the settings db returns false.
+            session(['dbVersion' => $dbVersion]);
+        }
+
+        $dbVersionInt = $this->getVersionInt($dbVersion);
+        $settingsDbVersionInt = $this->getVersionInt($settingsDbVersion);
+
+        // Self-heal a stale session cache: the cached db-version survives an
+        // update run by ANOTHER session (an admin upgrading the install), which
+        // used to strand every other live session in a redirect loop (any page
+        // -> /install/update -> back again) until their cookies were cleared.
+        // Before concluding "not updated" from a CACHED value, re-read the real
+        // version from the database — one extra query, and only on the path
+        // that would otherwise redirect.
+        if ($dbVersionInt < $settingsDbVersionInt && $cachedDbVersion !== null) {
+            $freshDbVersion = app()->make(SettingRepository::class)->getSetting('db-version');
+            if ($freshDbVersion !== false) {
+                $dbVersion = $freshDbVersion;
+                session(['dbVersion' => $dbVersion]);
+                $dbVersionInt = $this->getVersionInt($dbVersion);
+            }
+        }
+
+        session(['isUpdated' => $dbVersionInt >= $settingsDbVersionInt]);
+
+        if (session('isUpdated')) {
+            return $next($request);
+        }
+
+        if (! $response = $this->redirectToUpdate()) {
+            return $next($request);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Redirect to update
+     *
+     * @throws \Illuminate\Contracts\Container\BindingResolutionException
+     */
+    private function redirectToUpdate(): Response|false
+    {
+        $frontController = app()->make(Frontcontroller::class);
+
+        $allowedRoutes = ['install', 'install.update', 'api.i18n'];
+        $allowedRoutes = self::dispatchFilter('allowedRoutes', $allowedRoutes);
+        if (in_array($frontController::getCurrentRoute(), $allowedRoutes)) {
+            return false;
+        }
+
+        $route = BASE_URL.'/install/update';
+        $route = self::dispatchFilter('redirectroute', $route);
+
+        return $frontController::redirect($route);
+    }
+
+    private function getVersionInt($version)
+    {
+        $versionArray = explode('.', $version);
+        if (count($versionArray) == 3) {
+            $major = $versionArray[0];
+            $minor = str_pad($versionArray[1], 2, '0', STR_PAD_LEFT);
+            $patch = str_pad($versionArray[2], 2, '0', STR_PAD_LEFT);
+            $newDBVersion = $major.$minor.$patch;
+
+            return $newDBVersion;
+        }
+
+        return false;
+    }
+}

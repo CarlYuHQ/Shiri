@@ -1,0 +1,62 @@
+<?php
+
+namespace Shiri\Domain\Tickets\Controllers;
+
+use Shiri\Core\Controller\Controller;
+use Shiri\Domain\Clients\Services\Clients as ClientService;
+use Shiri\Domain\Tickets\Services\Tickets as TicketService;
+
+class RoadmapAll extends Controller
+{
+    private TicketService $ticketService;
+
+    private ClientService $clientService;
+
+    /**
+     * init - initialize private variables
+     */
+    public function init(
+        ClientService $clientService,
+        TicketService $ticketService
+    ): void {
+        $this->clientService = $clientService;
+        $this->ticketService = $ticketService;
+    }
+
+    /**
+     * get - handle get requests
+     */
+    public function get($params)
+    {
+        $clientId = 0;
+        $currentClientName = '';
+        if (isset($_GET['client']) === true && $_GET['client'] != '') {
+            $clientId = (int) $_GET['client'];
+            $currentClientName = $this->ticketService->getClientNameById($clientId);
+        }
+
+        $allProjectMilestones = $this->ticketService->getAllMilestonesOverview(false, 'date', false, $clientId);
+
+        $allClients = $this->clientService->getUserClients(session('userdata.id'));
+
+        $this->tpl->assign('currentClientName', $currentClientName);
+        $this->tpl->assign('currentClient', $clientId);
+
+        $this->tpl->assign('milestones', $allProjectMilestones);
+        $this->tpl->assign('clients', $allClients);
+
+        return $this->tpl->display('tickets.roadmapAll');
+    }
+
+    /**
+     * post - handle post requests
+     */
+    public function post($params)
+    {
+        $allProjectMilestones = $this->ticketService->getAllMilestonesOverview();
+
+        $this->tpl->assign('milestones', $allProjectMilestones);
+
+        return $this->tpl->display('tickets.roadmapAll');
+    }
+}

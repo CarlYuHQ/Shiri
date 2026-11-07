@@ -1,0 +1,546 @@
+<?php
+
+namespace Shiri\Domain\Notifications\Services;
+
+use Exception;
+use Illuminate\Support\Facades\Log;
+use Shiri\Core\Language as LanguageCore;
+use Shiri\Core\Support\OutboundHttpClient;
+use Shiri\Domain\Notifications\Models\Notification as NotificationModel;
+use Shiri\Domain\Setting\Repositories\Setting as SettingRepository;
+use Shiri\Domain\Tickets\Services\Tickets;
+use Psr\Http\Message\ResponseInterface;
+
+/**
+ * Posts project notifications to the messenger webhooks a project has configured (Slack,
+ * Mattermost, Zulip, Discord, Telegram).
+ *
+ * Every request goes through {@see OutboundHttpClient}: the webhook URL is checked by the SSRF guard,
+ * the connection is pinned to the validated address (no DNS re-resolution), and connect/total
+ * timeouts bound each call. A refused URL surfaces as an exception and the webhook reports false.
+ */
+class Messengers
+{
+    private OutboundHttpClient $httpClient;
+
+    private SettingRepository $settingsRepo;
+
+    private LanguageCore $language;
+
+    private array $supportedMessengers = ['slack', 'discord', 'mattermost', 'zulip', 'telegram'];
+
+    private string $projectName = '';
+
+    /**
+     * __construct - get database connection
+     *
+     *
+     * @api
+     */
+    public function __construct(
+        OutboundHttpClient $httpClient,
+        SettingRepository $settingsRepo,
+        LanguageCore $language
+    ) {
+        $this->httpClient = $httpClient;
+        $this->settingsRepo = $settingsRepo;
+        $this->language = $language;
+    }
+
+    /**
+     * @api
+     */
+    /**
+     * @internal Not exposed over JSON-RPC: it posts a caller-built message to a project's
+     *           Slack/Mattermost/Teams webhooks with no permission check. Projects service only.
+     */
+    public function sendNotificationToMessengers(NotificationModel $notification, $projectName, array|string $messengers = 'all'): void
+    {
+        $this->projectName = $projectName ?? 'a Shiri project';
+
+        $messengersToSend = [];
+        if (is_string($messengers) && $messengers == 'all') {
+            $messengersToSend = $this->supportedMessengers;
+        } elseif (is_array($messengers)) {
+            foreach ($messengers as $messenger) {
+                if (in_array($messenger, $this->supportedMessengers)) {
+                    $messengersToSend[] = $messenger;
+                }
+            }
+        }
+
+        foreach ($messengersToSend as $messenger) {
+            $this->{''.$messenger.'Webhook'}($notification);
+        }
+    }
+
+    /**
+     * slackWebhook
+     *
+     *
+     * @api
+     */
+    private function slackWebhook(NotificationModel $notification): bool
+    {
+        $slackWebhookURL = $this->settingsRepo->getSetting("projectsettings.{$notification->projectId}.slackWebhookURL");
+
+        if ($slackWebhookURL !== '' && $slackWebhookURL !== false) {
+            $message = $this->prepareMessage($notification);
+
+            $data = [
+                'text' => '',
+                'attachments' => $message,
+            ];
+
+            $data_string = json_encode($data);
+
+            try {
+                $response = $this->httpClient->post($slackWebhookURL, [
+                    'body' => $data_string,
+                    'headers' => ['Content-Type' => 'application/json'],
+                ]);
+
+                return $this->isDelivered($response, 'Slack');
+            } catch (\Throwable $e) {
+                report($e);
+
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * mattermostWebhook
+     *
+     *
+     * @api
+     */
+    private function mattermostWebhook(NotificationModel $notification): bool
+    {
+
+        $mattermostWebhookURL = $this->settingsRepo->getSetting("projectsettings.{$notification->projectId}.mattermostWebhookURL");
+
+        if ($mattermostWebhookURL !== '' && $mattermostWebhookURL !== false) {
+            $message = $this->prepareMessage($notification);
+
+            $data = [
+                'username' => 'Shiri',
+                'icon_url' => '',
+                'text' => '',
+                'attachments' => $message,
+            ];
+
+            $data_string = json_encode($data);
+
+            try {
+                $response = $this->httpClient->post($mattermostWebhookURL, [
+                    'body' => $data_string,
+                    'headers' => ['Content-Type' => 'application/json'],
+                ]);
+
+                return $this->isDelivered($response, 'Mattermost');
+            } catch (Exception $e) {
+                report($e);
+
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     *  zulipWebhook
+     *
+     *
+     * @api
+     */
+    private function zulipWebhook(NotificationModel $notification): bool
+    {
+        $zulipWebhookSerialized = $this->settingsRepo->getSetting("projectsettings.{$notification->projectId}.zulipHook");
+
+        if ($zulipWebhookSerialized !== false && $zulipWebhookSerialized !== '') {
+            $zulipWebhook = safe_unserialize($zulipWebhookSerialized, []);
+
+            $botEmail = $zulipWebhook['zulipEmail'];
+            $botKey = $zulipWebhook['zulipBotKey'];
+            $botURL = $zulipWebhook['zulipURL'].'/api/v1/messages';
+
+            $prepareChatMessage = '**Project: '.$this->projectName."** \n\r".$notification->message;
+            if ($notification->url !== false) {
+                $prepareChatMessage .= ' '.$notification->url['url'].'';
+            }
+
+            $data = [
+                'type' => 'stream',
+                'to' => $zulipWebhook['zulipStream'],
+                'topic' => $zulipWebhook['zulipTopic'],
+                'content' => $prepareChatMessage,
+            ];
+
+            $curlUrl = $botURL.'?'.http_build_query($data);
+
+            $data_string = json_encode($data);
+
+            try {
+                $response = $this->httpClient->post($curlUrl, [
+                    'body' => $data_string,
+                    'headers' => ['Content-Type' => 'application/json'],
+                    'auth' => [
+                        $botEmail,
+                        $botKey,
+                    ],
+                ]);
+
+                return $this->isDelivered($response, 'Zulip');
+            } catch (\Throwable $e) {
+                report($e);
+
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * telegramWebhook
+     */
+    private function telegramWebhook(NotificationModel $notification): bool
+    {
+        $telegramHookSerialized = $this->settingsRepo->getSetting("projectsettings.{$notification->projectId}.telegramHook");
+
+        if ($telegramHookSerialized !== false && $telegramHookSerialized !== '') {
+            $telegramHook = safe_unserialize($telegramHookSerialized, []);
+
+            if (! is_array($telegramHook) || empty($telegramHook['telegramBotToken']) || empty($telegramHook['telegramChatId'])) {
+                return false;
+            }
+
+            $text = $this->prepareTelegramMessage($notification);
+
+            $data = [
+                'chat_id' => $telegramHook['telegramChatId'],
+                'text' => $text,
+                'parse_mode' => 'HTML',
+                'disable_web_page_preview' => true,
+            ];
+
+            if (! empty($telegramHook['telegramTopicId']) && is_numeric($telegramHook['telegramTopicId']) && (int) $telegramHook['telegramTopicId'] > 0) {
+                $data['message_thread_id'] = (int) $telegramHook['telegramTopicId'];
+            }
+
+            try {
+                $response = $this->httpClient->post(
+                    "https://api.telegram.org/bot{$telegramHook['telegramBotToken']}/sendMessage",
+                    [
+                        'connect_timeout' => 5,
+                        'timeout' => 10,
+                        'json' => $data,
+                    ]
+                );
+
+                $resBody = json_decode((string) $response->getBody(), true);
+
+                return is_array($resBody) && ! empty($resBody['ok']);
+            } catch (\Throwable $e) {
+                Log::warning('Telegram sendMessage failed', ['exception' => get_class($e)]);
+
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * prepareTelegramMessage
+     */
+    private function prepareTelegramMessage(NotificationModel $notification): string
+    {
+        $headline = '';
+        $status = '';
+        $priority = '';
+        $userId = 0;
+        $userFirstname = '';
+        $userLastname = '';
+        $dateToFinish = '';
+
+        if (isset($notification->entity)) {
+            if (is_array($notification->entity)) {
+                $headline = $notification->entity['headline'] ?? '';
+                $status = $notification->entity['status'] ?? '';
+                $priority = $notification->entity['priority'] ?? '';
+                $userId = (int) ($notification->entity['userId'] ?? 0);
+                $userFirstname = $notification->entity['userFirstname'] ?? $notification->entity['user_firstname'] ?? '';
+                $userLastname = $notification->entity['userLastname'] ?? $notification->entity['user_lastname'] ?? '';
+                $dateToFinish = $notification->entity['dateToFinish'] ?? $notification->entity['timelineDateToFinish'] ?? '';
+            } elseif (is_object($notification->entity)) {
+                $headline = $notification->entity->headline ?? '';
+                $status = $notification->entity->status ?? '';
+                $priority = $notification->entity->priority ?? '';
+                $userId = (int) ($notification->entity->userId ?? 0);
+                $userFirstname = $notification->entity->userFirstname ?? $notification->entity->user_firstname ?? '';
+                $userLastname = $notification->entity->userLastname ?? $notification->entity->user_lastname ?? '';
+                $dateToFinish = $notification->entity->dateToFinish ?? $notification->entity->timelineDateToFinish ?? '';
+            }
+        }
+
+        $ticketService = null;
+        try {
+            $ticketService = app()->make(Tickets::class);
+        } catch (\Throwable $e) {
+            // Container resolution fallback
+        }
+
+        // 1. Task Title
+        $taskTitle = ! empty($headline) ? $headline : $notification->message;
+
+        // 2. Status
+        $statusName = '';
+        if ((is_int($status) || is_string($status)) && $status !== '') {
+            if ($ticketService !== null) {
+                try {
+                    $statusLabelsArray = $ticketService->getStatusLabels($notification->projectId);
+                    if (isset($statusLabelsArray[$status]['name']) && $statusLabelsArray[$status]['name'] !== '') {
+                        $statusName = $statusLabelsArray[$status]['name'];
+                    } else {
+                        $statusName = (string) $status;
+                    }
+                } catch (\Throwable $e) {
+                    $statusName = (string) $status;
+                }
+            } else {
+                $statusName = (string) $status;
+            }
+        }
+
+        // 3. Priority
+        $priorityName = '';
+        if (! empty($priority)) {
+            if ($ticketService !== null) {
+                try {
+                    $priorityLabels = $ticketService->getPriorityLabels();
+                    if (! empty($priorityLabels[$priority])) {
+                        $priorityName = $priorityLabels[$priority];
+                    }
+                } catch (\Throwable $e) {
+                    // Fallback to static mapping
+                }
+            }
+
+            if (empty($priorityName)) {
+                $priorityMap = [
+                    '1' => 'Critical',
+                    '2' => 'High',
+                    '3' => 'Medium',
+                    '4' => 'Low',
+                    '5' => 'Lowest',
+                    'critical' => 'Critical',
+                    'high' => 'High',
+                    'medium' => 'Medium',
+                    'low' => 'Low',
+                    'lowest' => 'Lowest',
+                    'urgent' => 'Urgent',
+                ];
+                $priorityName = $priorityMap[strtolower((string) $priority)] ?? (string) $priority;
+            }
+        }
+
+        // 4. Assigned To
+        $assignedTo = trim("{$userFirstname} {$userLastname}");
+        if (empty($assignedTo) && $userId > 0) {
+            try {
+                $userService = app()->make(\Shiri\Domain\Users\Services\Users::class);
+                $user = $userService->getUser($userId);
+                if (! empty($user)) {
+                    $assignedTo = trim(($user['firstname'] ?? '').' '.($user['lastname'] ?? ''));
+                }
+            } catch (\Throwable $e) {
+                // Keep default if user service unresolvable
+            }
+        }
+
+        // 5. Due Date
+        $formattedDueDate = '';
+        if (! empty($dateToFinish) && $dateToFinish !== '0000-00-00 00:00:00' && $dateToFinish !== '0000-00-00') {
+            try {
+                $formattedDueDate = dtHelper()->parseDbDateTime($dateToFinish)->formatDateForUser();
+            } catch (\Throwable $e) {
+                $formattedDueDate = (string) $dateToFinish;
+            }
+        }
+
+        // 6. Link
+        $urlLink = is_array($notification->url) && ! empty($notification->url['url']) ? $notification->url['url'] : '';
+
+        // Build clean Telegram message
+        $lines = [];
+        $lines[] = '📋 <b>'.e($this->projectName).'</b>';
+        $lines[] = '';
+
+        if (! empty($taskTitle)) {
+            $lines[] = '📌 <b>'.e($this->language->__('label.title')).':</b> '.e($taskTitle);
+        }
+        if ($statusName !== '' && $statusName !== 'N/A') {
+            $lines[] = '🏷 <b>'.e($this->language->__('label.todo_status')).':</b> '.e($statusName);
+        }
+        if (! empty($priorityName)) {
+            $lines[] = '⚡ <b>'.e($this->language->__('label.priority')).':</b> '.e($priorityName);
+        }
+        if (! empty($assignedTo) && $assignedTo !== 'Unassigned') {
+            $lines[] = '👤 <b>'.e($this->language->__('label.assigned_to')).':</b> '.e($assignedTo);
+        }
+        if (! empty($formattedDueDate)) {
+            $lines[] = '📅 <b>'.e($this->language->__('label.due_date')).':</b> '.e($formattedDueDate);
+        }
+
+        if (! empty($urlLink)) {
+            $hrefUrl = $urlLink;
+            // Only rewrite localhost→127.0.0.1 in local/dev environments.
+            // Self-hosted installs that legitimately use localhost as their base URL
+            // must not be mutated in production.
+            if (app()->isLocal()) {
+                $hrefUrl = preg_replace('/^(https?:\/\/)localhost(?=[\/:]|$)/i', '${1}127.0.0.1', $hrefUrl);
+            }
+            $hrefUrl = str_replace('#', '%23', $hrefUrl);
+            $lines[] = '';
+            $lines[] = '👉 <a href="'.e($hrefUrl).'">'.e($this->language->__('label.open_in_shiri')).'</a>';
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * mattermostWebhook
+     *
+     *
+     * @api
+     */
+    public function discordWebhook(NotificationModel $notification): bool
+    {
+        $ticketService = app()->make(Tickets::class);
+
+        for ($i = 1; $i <= 3; $i++) {
+            $discordWebhookURL = $this->settingsRepo->getSetting("projectsettings.{$notification->projectId}.discordWebhookURL{$i}");
+            if ($discordWebhookURL !== '' && $discordWebhookURL !== false) {
+                $fields = [
+                    [
+                        'name' => $this->language->__('label.project'),
+                        'value' => $this->projectName,
+                        'inline' => true,
+                    ],
+                ];
+
+                $statusLabelsArray = $ticketService->getStatusLabels($notification->projectId);
+                if (! empty($notification->entity->status) && ! empty($statusLabelsArray[$notification->entity->status])) {
+                    $fields[] = [
+                        'name' => $this->language->__('label.todo_status'),
+                        'value' => $statusLabelsArray[$notification->entity->status]['name'],
+                        'inline' => true,
+                    ];
+                }
+
+                $url_link = (
+                    empty($notification->url['url'])
+                    ? ''
+                    : $notification->url['url']
+                );
+
+                // For details on the JSON layout: https://birdie0.github.io/discord-webhooks-guide/index.html
+                $data_string = json_encode([
+                    'avatar_url' => 'https://s3-us-west-2.amazonaws.com/shiri-website/wp-content/uploads/2019/03/22224016/logoIcon.png',
+                    'tts' => false,
+                    'embeds' => [
+                        [
+                            'color' => hexdec('1b75bb'),
+                            'title' => $notification->message,
+                            'url' => $url_link,
+                            'timestamp' => date('c', strtotime('now')),
+                            'fields' => $fields,
+                        ],
+                    ],
+                ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+                try {
+                    $response = $this->httpClient->post($discordWebhookURL, [
+                        'body' => $data_string,
+                        'headers' => ['Content-Type' => 'application/json'],
+                    ]);
+
+                    if (! $this->isDelivered($response, 'Discord')) {
+                        return false;
+                    }
+                } catch (\Throwable $e) {
+                    report($e);
+
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether a messenger accepted the notification: only a 2xx answer counts. The outbound
+     * client never follows a redirect for a POST, so a 3xx means the payload was not delivered.
+     * Logs the messenger and status only — never the webhook URL, which carries its secret.
+     *
+     * @param  ResponseInterface  $response  The messenger's answer.
+     * @param  string  $messenger  The messenger name, for the log.
+     */
+    private function isDelivered(ResponseInterface $response, string $messenger): bool
+    {
+        $status = $response->getStatusCode();
+        if ($status >= 200 && $status < 300) {
+            return true;
+        }
+
+        Log::warning('Messenger notification was not delivered', ['messenger' => $messenger, 'status' => $status]);
+
+        return false;
+    }
+
+    /**
+     * @return array[]
+     *
+     * @api
+     */
+    public function prepareMessage(NotificationModel $notification): array
+    {
+        $ticketService = app()->make(Tickets::class);
+        if (is_array($notification->entity)) {
+            $headline = $notification->entity['headline'] ?? '';
+            $status = $notification->entity['status'] ?? '';
+        } else {
+            $headline = $notification->entity->headline;
+            $status = $notification->entity->status;
+        }
+
+        $fields = [
+            'title' => $this->language->__('headlines.project_with_name').' '.$this->projectName,
+            'short' => false,
+        ];
+
+        $statusLabelsArray = $ticketService->getStatusLabels($notification->projectId);
+        if (! empty($statusLabelsArray[$status])) {
+            $fields['value'] = $this->language->__('label.todo_status').': '.$statusLabelsArray[$status]['name'];
+        }
+
+        $message = [
+            [
+                'color' => '#006d9f',
+                'fallback' => $notification->message,
+                'pretext' => $notification->message,
+                'title' => $headline,
+                'title_link' => $notification->url['url'],
+                'fields' => [$fields],
+            ],
+        ];
+
+        return $message;
+    }
+}

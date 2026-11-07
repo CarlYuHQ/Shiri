@@ -1,0 +1,442 @@
+<?php
+
+namespace Shiri\Core\Support;
+
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
+use Illuminate\Support\Facades\Date;
+use Shiri\Core\Language;
+use PHPUnit\Exception;
+
+/**
+ * Class Format
+ *
+ * This class provides various formatting methods for simple data types (strings, ints, floats)
+ */
+class Format
+{
+    private mixed $value = '';
+
+    private mixed $value2 = '';
+
+    private DateTimeHelper $dateTimeHelper;
+
+    private Language $language;
+
+    /**
+     * Creates a new instance of the class.
+     *
+     * PSA: This class will NOT throw exceptions or error messages since it is a user facing string formatting class.
+     * If you need to evaluate correct parsing of datetimes use the datetime helper and not this format class.
+     *
+     * @param  string|int|float  $value  The value to be assigned. If empty, the constructor will return early.
+     * @param  null|string|int|float  $value2  The second value to be assigned. It can be null. Used for certain cases
+     *                                         as specified by $fromFormat.
+     * @param  FromFormat|null  $fromFormat  The format of the values. Can be one of the constants defined in the
+     *                                       FromFormat class.
+     * @return void
+     */
+    public function __construct(
+        string|int|float|null|\DateTimeInterface|CarbonInterface $value,
+        string|int|float|null|\DateTimeInterface|CarbonInterface $value2,
+        ?FromFormat $fromFormat = FromFormat::DbDate
+    ) {
+
+        $this->dateTimeHelper = app()->make(DateTimeHelper::class);
+        $this->language = app()->make(Language::class);
+
+        if (empty($value)) {
+            return;
+        }
+
+        if ($value instanceof \DateTime) {
+            $value = CarbonImmutable::create($value);
+            $this->value = CarbonImmutable::create($value);
+        }
+
+        if ($value2 instanceof \DateTime) {
+            $value2 = CarbonImmutable::create($value2);
+            $this->value = CarbonImmutable::create($value2);
+        }
+
+        try {
+            switch ($fromFormat) {
+                case FromFormat::DbDate:
+                    $this->value = $this->dateTimeHelper->parseDbDateTime($value);
+                    break;
+                case FromFormat::UserDateTime:
+                    $this->value = $this->dateTimeHelper->parseUserDateTime($value, $value2);
+                    break;
+                case FromFormat::User24hTime:
+                    $this->value = $this->dateTimeHelper->parseUser24hTime($value);
+                    break;
+                case FromFormat::Db24hTime:
+                    $this->value = $this->dateTimeHelper->parseDb24hTime($value);
+                    break;
+                case FromFormat::UserDateStartOfDay:
+                    $this->value = $this->dateTimeHelper->parseUserDateTime($value, 'start');
+                    break;
+                case FromFormat::UserDateEndOfDay:
+                    $this->value = $this->dateTimeHelper->parseUserDateTime($value, 'end');
+                    break;
+                default:
+                    $this->value = $value;
+                    break;
+            }
+        } catch (\Throwable $e) {
+            // Several things can throw exceptions in the date parsing scripts.
+            // Most common is an invalid date format. This could also be an empty string or a 0000-00... date.
+            // Since this format class is purely for user facing purposes we will not show an error message
+            // but return an empty string.
+            $this->value = $value;
+
+            return;
+        }
+    }
+
+    /**
+     * Returns the user formatted date string based on the 'value' property.
+     *
+     * @param  string  $emptyOutput  The output to be returned when the 'value' property is empty.
+     *                               Defaults to an empty string.
+     * @return string The formatted date string or the $emptyOutput if the 'value' property is empty or
+     *                the formatted date string is empty.
+     */
+    public function date(string $emptyOutput = ''): string
+    {
+
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return $emptyOutput;
+        }
+
+        $formattedDate = $this->value->formatDateForUser();
+
+        return $formattedDate !== '' ? $formattedDate : $emptyOutput;
+    }
+
+    /**
+     * Retrieve the formatted time string from the ISO value.
+     * Returns an empty string if 'value' is null.
+     *
+     * @return string The formatted time string.
+     */
+    public function time(): string
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return '';
+        }
+
+        return $this->value->formatTimeForUser();
+    }
+
+    /**
+     * Generates an ISO 8601 formatted date and time string in user timezone
+     *
+     * @return string The ISO 8601 formatted date and time string. Returns an empty string if the value is null.
+     */
+    public function isoDateTime(): string
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return '';
+        }
+
+        return $this->value->setToUserTimezone()->format('Y-m-d H:i:s');
+    }
+
+    /**
+     * Generates an ISO 8601 formatted date and time string in UTC timezone
+     *
+     * @return string The ISO 8601 formatted date and time string. Returns an empty string if the value is null.
+     */
+    public function isoDateTimeUTC(): string
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return '';
+        }
+
+        return $this->value->formatDateTimeForDb();
+    }
+
+    /**
+     * @deprecated
+     *
+     * This method is deprecated and only included because of plugin backwards compatibility.
+     * Once all plugins are updated this will be removed.
+     *
+     * @return string The ISO 8601 formatted date string. Returns an empty string if the value is null.
+     */
+    public function isoDate(): string
+    {
+
+        if (empty($this->value)) {
+            return '';
+        }
+
+        // This method should not be used anymore however we have plugins that are still using it and they will not have
+        // the new enum values. So they are still calling format($var)->isoDate() without a enum modifier that would
+        // indicate that this is a user date (which it was historically).
+        // So now we have to shuffle things around and since the format was probably not correct anyways, let's reparse
+
+        if (! $this->value instanceof CarbonImmutable) {
+
+            try {
+                $this->value = $this->dateTimeHelper->parseUserDateTime($this->value, 'start');
+            } catch (Exception $e) {
+                report($e);
+
+                return '';
+            }
+
+        } else {
+
+            // If for some reason Carbon was able to parse the date we'll need to make sure the timezone is set to the
+            // users timezone.
+
+            // Date was falsly parsed as UTC but is actually user date. Shift timezone.
+            $userTimezone = session('usersettings.timezone');
+            // Carbon shift timezone will change timezone without actually changing the numbers
+            $this->value->shiftTimezone($userTimezone);
+        }
+
+        return $this->value->formatDateTimeForDb();
+    }
+
+    /**
+     * Generate unix timestamp from date.
+     */
+    public function timestamp(): int|bool
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return false;
+        }
+
+        return $this->value->getTimestamp();
+    }
+
+    /**
+     * Generate unix timestamp from date in miliseconds for javascript usage
+     */
+    public function jsTimestamp(): int|bool
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return false;
+        }
+
+        return $this->value->getTimestampMs();
+    }
+
+    /**
+     * Retrieves the 24-hour time string from the ISO formatted value property.
+     *
+     * @return string The 24-hour time string. If the value property is null, an empty string is returned.
+     */
+    public function time24(): string
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return '';
+        }
+
+        return $this->value->format24HTimeForUser();
+    }
+
+    /**
+     * Converts a 24-hour formatted time string to a user-friendly time string.
+     *
+     * @return string The user-friendly time string in the format "H:i A". Returns an empty string if the value is null.
+     */
+    public function userTime24toUserTime(): string
+    {
+        if (empty($this->value) || ! $this->value instanceof CarbonImmutable) {
+            return '';
+        }
+
+        return $this->value->formatTimeForUser();
+
+    }
+
+    /**
+     * Generates a string representation of currency.
+     *
+     * @return string The string representation of currency.
+     */
+    public function currency(): string
+    {
+        if ($this->value == null) {
+            return '';
+        }
+
+        return $this->language->__('language.currency').''.number_format($this->value, 2);
+    }
+
+    /**
+     * Generates a string representation of a percentage.
+     *
+     * @return string The percentage string. Returns an empty string if the value is null.
+     *                If the second value is empty, the first value is returned with a "%" sign appended.
+     *                If both values are set, the percentage is calculated and formatted to two decimal places, followed by a "%" sign.
+     */
+    public function percent(): string
+    {
+        // First value empty, just return empty string
+        if ($this->value == null) {
+            return '';
+        }
+
+        // Second value empty return first value with % sign
+        if (empty($this->value2)) {
+            return number_format($this->value, 2).'%';
+        }
+
+        // Both values set. Return percent calculation
+        $percent = ($this->value / $this->value2) * 100;
+
+        return number_format($percent, 2).'%';
+    }
+
+    /**
+     * Formats a decimal number with two decimal places.
+     *
+     * @return string The decimal number formatted with two decimal places.
+     */
+    public function decimal(): string
+    {
+        return number_format((float) $this->value, 2);
+    }
+
+    /**
+     * Render decimal hours as hours and minutes, e.g. 1.25 -> "1h 15m", 0.26 -> "0h 16m" (#2004).
+     *
+     * Static on purpose: the Format constructor tries to parse its value as a date first, which a
+     * decimal like "1.25" must never go through. Minutes are rounded; non-numeric input yields ''.
+     *
+     * @param  mixed  $decimalHours  Hours as stored (float, int or numeric string)
+     * @param  string  $pattern  sprintf pattern receiving (hours, zero-padded minutes)
+     * @return string The formatted duration, or '' when the input is not numeric
+     */
+    public static function hoursMinutes(mixed $decimalHours, string $pattern = '%sh %sm'): string
+    {
+        if (! is_numeric($decimalHours)) {
+            return '';
+        }
+
+        $totalMinutes = (int) round(abs((float) $decimalHours) * 60);
+        $sign = (float) $decimalHours < 0 && $totalMinutes > 0 ? '-' : '';
+        $hours = intdiv($totalMinutes, 60);
+        $minutes = str_pad((string) ($totalMinutes % 60), 2, '0', STR_PAD_LEFT);
+
+        return $sign.sprintf($pattern, $hours, $minutes);
+    }
+
+    /**
+     * Format a number with up to $maxPrecision decimals and thousands separators, e.g. 1234.5 -> "1,234.5",
+     * 3.0 -> "3".
+     *
+     * Uses Laravel's locale-aware Number::format() when the intl extension is available. intl is not a
+     * hard requirement of Shiri, and Number::format() throws without it (the report pages 500'd in
+     * images built without intl, #3838), so fall back to number_format() and trim trailing zeros.
+     * Static for the same reason as hoursMinutes(): the value must not go through date parsing.
+     *
+     * @param  mixed  $value  Number (float, int or numeric string); non-numeric input yields ''
+     * @param  int  $maxPrecision  Maximum number of decimals
+     */
+    public static function number(mixed $value, int $maxPrecision = 1): string
+    {
+        if (! is_numeric($value)) {
+            return '';
+        }
+
+        if (extension_loaded('intl')) {
+            return (string) \Illuminate\Support\Number::format((float) $value, maxPrecision: $maxPrecision);
+        }
+
+        return self::numberWithoutIntl((float) $value, $maxPrecision);
+    }
+
+    /**
+     * number() without the intl extension, matching Number::format() for the default locale: ties
+     * round to even, and trailing zeros (and a dangling decimal point) are removed so 3.0 reads "3".
+     *
+     * @param  float  $value  Number to format
+     * @param  int  $maxPrecision  Maximum number of decimals
+     */
+    public static function numberWithoutIntl(float $value, int $maxPrecision = 1): string
+    {
+        // intl rounds ties to even (7.25 -> 7.2); number_format() alone rounds them away from zero.
+        $precision = max(0, $maxPrecision);
+        $formatted = number_format(round($value, $precision, PHP_ROUND_HALF_EVEN), $precision);
+
+        if ($maxPrecision > 0 && str_contains($formatted, '.')) {
+            $formatted = rtrim(rtrim($formatted, '0'), '.');
+        }
+
+        return $formatted === '-0' ? '0' : $formatted;
+    }
+
+    /**
+     * Rich-text (editor HTML) to a single line of plain text, e.g. for CSV export (#786).
+     *
+     * Block-level boundaries and <br> become spaces so "<p>a</p><p>b</p>" reads "a b", entities
+     * are decoded, and all whitespace (including non-breaking spaces) collapses to single spaces.
+     *
+     * @param  string|null  $html  Stored description markup
+     * @return string Plain text without markup
+     */
+    public static function plainText(?string $html): string
+    {
+        if ($html === null || $html === '') {
+            return '';
+        }
+
+        $blockBoundary = '/<\/?(p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|blockquote|pre)\b[^>]*>/i';
+        $withBoundaries = preg_replace($blockBoundary, ' ', $html) ?? $html;
+        $text = html_entity_decode(strip_tags($withBoundaries), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        return trim(preg_replace('/[\s\x{00A0}]+/u', ' ', $text) ?? $text);
+    }
+
+    /**
+     * Neutralize spreadsheet formulas in an exported cell value (CSV injection): a value starting
+     * with =, +, -, @, tab or carriage return is prefixed with a single quote so Excel/Sheets/Calc
+     * treat it as text. Other values are returned unchanged.
+     *
+     * @param  string  $value  Cell value as it would be exported
+     * @return string Formula-safe cell value
+     */
+    public static function spreadsheetSafe(string $value): string
+    {
+        if ($value !== '' && str_contains("=+-@\t\r", $value[0])) {
+            return "'".$value;
+        }
+
+        return $value;
+    }
+
+    public function diffForHumans(): string
+    {
+        if ($this->value->isToday()) {
+            return $this->language->__('dates.today');
+        } elseif ($this->value->isYesterday()) {
+            return $this->language->__('dates.yesterday');
+        } elseif ($this->value->isTomorrow()) {
+            return $this->language->__('dates.tomorrow');
+        } else {
+            return $this->value->endOfDay()->diffForHumans();
+        }
+    }
+
+    /**
+     * Format bytes to human readable format
+     *
+     * @return string The formatted size
+     */
+    public function formatBytes(): string
+    {
+        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+
+        $bytes = max($this->value, 0);
+        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+        $pow = min($pow, count($units) - 1);
+
+        return round($bytes / (1024 ** $pow), 2).' '.$units[$pow];
+    }
+}

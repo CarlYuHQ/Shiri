@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.shiri.nginx</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/nginx/bin/nginx</string>
+        <string>-c</string>
+        <string>__BASE__/runtime/nginx.conf</string>
+        <string>-p</string>
+        <string>__BASE__/runtime</string>
+        <string>-g</string>
+        <string>daemon off;</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>__BASE__/runtime/logs/nginx-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__BASE__/runtime/logs/nginx-stderr.log</string>
+</dict>
+</plist>

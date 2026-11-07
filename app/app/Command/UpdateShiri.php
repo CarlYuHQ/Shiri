@@ -1,0 +1,231 @@
+<?php
+
+namespace Shiri\Command;
+
+use Illuminate\Console\Command;
+use Illuminate\Contracts\Container\BindingResolutionException;
+use Illuminate\Support\Facades\Http;
+use Shiri\Core\Configuration\AppSettings;
+use Shiri\Core\Plugins\PluginCompatibility;
+use Shiri\Domain\Plugins\Services\Plugins;
+use Symfony\Component\Console\Attribute\AsCommand;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Style\SymfonyStyle;
+
+/**
+ * Class UpdateShiri
+ */
+#[AsCommand(
+    name: 'system:update',
+    description: 'Updates Shiri to the latest version from Github',
+)]
+class UpdateShiri extends Command
+{
+    protected function configure(): void
+    {
+        parent::configure();
+        $this->addOption(name: 'skipDbBackup', mode: InputOption::VALUE_NONE);
+    }
+
+    /**
+     * Executes the update process.
+     *
+     * @param  InputInterface  $input  The input interface object.
+     * @param  OutputInterface  $output  The output interface object.
+     * @return int 0 if everything went fine, or an exit code.
+     *
+     * @throws BindingResolutionException|\Throwable
+     */
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $appSettings = app()->make(AppSettings::class);
+
+        $io = new SymfonyStyle($input, $output);
+
+        $currentVersion = $appSettings->appVersion;
+        $io->text('Starting the updater');
+
+        // Check Versions  + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Version Check');
+        $io->text('Your current version is: v'.$currentVersion);
+        $url = 'https://github.com/shiri/shiri/releases/latest';
+        $io->text('Checking latest version on Github...');
+
+        // Create stream context to follow redirects
+        $context = stream_context_create(
+            [
+                'http' => [
+                    'method' => 'GET',
+                    'header' => 'Accept: application/json',
+                    'follow_location' => true,
+                ],
+            ],
+        );
+
+        // Use file_get_contents() with HTTP context to fetch url
+        $result = file_get_contents($url, false, $context);
+        $jsonResponse = json_decode($result, true);
+        $latestVersion = $jsonResponse['tag_name'] ?? null;
+
+        $io->text('The latest Shiri version is: '.$latestVersion);
+
+        // Build download URL
+        if (version_compare($currentVersion, ltrim($latestVersion, 'v'), '>=')) {
+            $io->success('You are on the most up to date version');
+
+            return self::SUCCESS;
+        }
+
+        // Plugin compatibility + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        // Plugins that don't support the new version won't load after the update (core skips
+        // them), so say which ones before anything changes.
+        $io->section('Plugin Compatibility');
+
+        /** @var Plugins $plugins */
+        $plugins = app()->make(Plugins::class);
+        $compatibility = app()->make(PluginCompatibility::class);
+        $targetVersion = ltrim((string) $latestVersion, 'v');
+
+        $incompatiblePlugins = collect($plugins->getAllPlugins(enabledOnly: true) ?: [])
+            ->filter(fn ($plugin) => $plugin->requires !== null)
+            ->reject(fn ($plugin) => $compatibility->isCompatible($plugin->requires, $targetVersion));
+
+        if ($incompatiblePlugins->isEmpty()) {
+            $io->text('All enabled plugins support v'.$targetVersion.'.');
+        } else {
+            $io->warning(array_merge(
+                ['These plugins do not support v'.$targetVersion.' and will not load after the update until you install a compatible version:'],
+                $incompatiblePlugins->map(fn ($plugin) => $plugin->name.' '.$plugin->version.' (supports '.$plugin->requires.')'.($plugin->type === 'system' ? ', system plugin from LEAN_PLUGINS: still loaded, check it before updating' : ''))->values()->all()
+            ));
+
+            // Automated runs keep going: core skips incompatible plugins, so the update itself is safe.
+            if ($input->isInteractive() && ! $io->confirm('Update Shiri anyway?', false)) {
+                $io->text('Update cancelled. Update the plugins first, then run system:update again.');
+
+                return self::SUCCESS;
+            }
+        }
+
+        // Backup DB + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Database Backup');
+        $skipBackup = $input->getOption('skipDbBackup');
+
+        if ($skipBackup === false) {
+            $backUp = new ArrayInput([
+                // The command name is passed as first argument
+                'command' => 'db:backup',
+            ]);
+
+            $this->getApplication()->doRun($backUp, $output);
+        }
+
+        // Download and extract + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Download & Extract');
+
+        $io->text('Downloading latest version...');
+        $downloadUrl = 'https://github.com/shiri/shiri/releases/download/'.$latestVersion.'/Shiri-'.$latestVersion.'.zip';
+        $zipFile = storage_path('/framework/cache/latest.zip');
+        Http::sink($zipFile)->get($downloadUrl);
+
+        $io->text('Extracting Archive...');
+
+        if (! class_exists(\ZipArchive::class)) {
+            $io->text('ZipArchive not found.  Cannot auto-update until the php zip extension is installed. On linux, \'sudo apt install php-zip\'');
+
+            return self::FAILURE;
+        }
+
+        $zip = new \ZipArchive;
+        if ($zip->open($zipFile) === true) {
+            $zip->extractTo(storage_path('/framework/cache/shiri'));
+            $zip->close();
+            $io->success('New update zip file successfully extracted to '.storage_path('/framework/cache/shiri'));
+        } else {
+            $io->text('Error opening downloaded zip file!');
+
+            return self::FAILURE;
+        }
+
+        // Disable Plugins + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        // If we got here everything is ready to go and we just need to move the files.
+        // Let's disable plugins
+        $io->section('Disabling Plugins');
+
+        $enabledPlugins = $plugins->getAllPlugins(enabledOnly: true);
+        foreach ($enabledPlugins as $plugin) {
+            if ($plugin->type != 'system' && isset($plugin->id)) {
+                $plugins->disablePlugin($plugin->id);
+                $io->text($plugin->name.': Disabled');
+            }
+        }
+
+        $io->success('Plugins disabled successfully');
+
+        // Applying Update + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Applying Update');
+        $cp_retval = 0;
+        $cp_output = [];
+        exec('cp -r '.storage_path('/framework/cache/shiri').'/* '.APP_ROOT.'/', $cp_output, $cp_retval);
+        $io->text('Returned with status '.$cp_retval.' and output:');
+        $io->text($cp_output);
+
+        if ($cp_retval == 0) {
+            $io->success('Files were updated');
+        } else {
+            $io->error('Could not apply update.  Please check the output above for more information.');
+
+            return self::FAILURE;
+        }
+
+        // Clear Cache + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Clearing Cache');
+
+        // Deliberately NOT a shell glob: inside the double quotes the shell never expanded
+        // `*.php`, so this delete silently did nothing for years. A stale
+        // bootstrap/cache/packages.php then survives updates and Laravel trusts it as-is —
+        // any provider added to composer.json since (e.g. laravel/mcp) never loads.
+        foreach (glob(APP_ROOT.'/bootstrap/cache/*.php') ?: [] as $cachedFile) {
+            unlink($cachedFile);
+        }
+        exec('rm -rf "'.APP_ROOT.'/storage/framework/composerPaths.php"');
+        exec('rm -rf "'.APP_ROOT.'/storage/framework/viewPaths.php"');
+
+        exec('rm -rf "'.APP_ROOT.'/storage/framework/cache/shiri"');
+        exec('rm -rf "'.APP_ROOT.'/storage/framework/cache/latest.zip"');
+
+        exec('find "'.APP_ROOT.'/storage/framework/cache" -type f ! -name ".gitignore" -delete');
+        exec('find "'.APP_ROOT.'/storage/framework/sessions" -type f ! -name ".gitignore" -delete');
+        exec('find "'.APP_ROOT.'/storage/framework/views" -type f ! -name ".gitignore" -delete');
+
+        $io->success('Clearing Cache Complete');
+
+        // Enable Plugins + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + + */
+        $io->section('Re-enabling Plugins');
+        foreach ($enabledPlugins as $plugin) {
+            if ($plugin->type != 'system' && isset($plugin->id)) {
+                // This process still runs the old code, so check against the version just installed.
+                if ($plugin->requires !== null && ! $compatibility->isCompatible($plugin->requires, $targetVersion)) {
+                    $io->text($plugin->name.': left disabled (supports '.$plugin->requires.')');
+
+                    continue;
+                }
+
+                if ($plugins->enablePluginForVersion($plugin->id, $targetVersion)) {
+                    $io->text($plugin->name.': Enabled');
+                } else {
+                    $io->text($plugin->name.': could not be enabled (license check failed); enable it in My Apps');
+                }
+            }
+        }
+
+        $io->success('Plugins were enabled');
+
+        $io->section('Summary');
+        $io->success('Update applied Successfully');
+
+        return Command::SUCCESS;
+    }
+}

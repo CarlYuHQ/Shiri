@@ -1,0 +1,21 @@
+@extends($layout)
+
+@section('content')
+
+@php
+    $id = (int) $_GET['id'];
+@endphp
+
+<x-global::actions.modal-header>
+    <x-slot:title>{!! __('subtitles.delete') !!}</x-slot:title>
+</x-global::actions.modal-header>
+<form method="post" class="formModal" action="{{ BASE_URL }}/calendar/delExternalCalendar/{{ $id }}">
+    @dispatchEvent('afterFormOpen')
+    <p>{!! __('text.confirm_calendar_deletion') !!}</p><br />
+    @dispatchEvent('beforeSubmitButton')
+    <x-global::forms.button inputType="submit" contentRole="primary" id="saveAndClose" value="closeModal">{!! __('buttons.yes_delete') !!}</x-global::forms.button>
+    <x-global::forms.button tag="a" contentRole="tertiary" link="{{ BASE_URL }}/calendar/showMyCalendar">{!! __('buttons.back') !!}</x-global::forms.button>
+    @dispatchEvent('beforeFormClose')
+</form>
+
+@endsection

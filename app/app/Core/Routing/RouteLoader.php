@@ -1,0 +1,119 @@
+<?php
+
+namespace Shiri\Core\Routing;
+
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Route;
+use Shiri\Core\Auth\Permissions\CheckPermissions;
+use Shiri\Core\Configuration\Environment;
+use Shiri\Core\Events\EventDispatcher;
+use Shiri\Core\Support\Installation;
+
+class RouteLoader
+{
+    /**
+     * Load all routes.php files from domains and plugins
+     */
+    public static function loadRoutes(): void
+    {
+        static $loaded;
+        $loaded ??= false;
+
+        if ($loaded) {
+            return;
+        }
+
+        // Load domain routes
+        self::loadDomainRoutes();
+
+        // Load system plugin routes (defined via config)
+        self::loadSystemPluginRoutes();
+
+        // Load user plugin routes (will be called via event after plugins are loaded)
+        EventDispatcher::add_event_listener('shiri.core.middleware.loadplugins.handle.pluginsEvents', function () {
+            self::loadUserPluginRoutes();
+        }, 50);
+
+        $loaded = true;
+    }
+
+    /**
+     * Load routes.php files from all domains
+     */
+    private static function loadDomainRoutes(): void
+    {
+        if ((bool) config('debug') === false) {
+            $domainPaths = Cache::store('installation')->rememberForever('domainRoutes', function () {
+                return self::getDomainPaths();
+            });
+        } else {
+            $domainPaths = self::getDomainPaths();
+        }
+
+        // Routes inherit the permission-enforcement middleware so #[RequiresPermission] on a
+        // native controller action is honored without per-route `can:` declarations.
+        Route::middleware([CheckPermissions::class])->group(function () use ($domainPaths) {
+            foreach ($domainPaths as $domainPath) {
+                if (file_exists($routesPath = "$domainPath/routes.php")) {
+                    require_once $routesPath;
+                }
+            }
+        });
+    }
+
+    /**
+     * Load routes.php files from system plugins (defined in config)
+     */
+    private static function loadSystemPluginRoutes(): void
+    {
+        if (isset(app(Environment::class)->plugins)) {
+            $configPlugins = explode(',', app(Environment::class)->plugins);
+
+            Route::middleware([CheckPermissions::class])->group(function () use ($configPlugins) {
+                foreach ($configPlugins as $plugin) {
+                    if (file_exists($pluginRoutesPath = APP_ROOT.'/app/Plugins/'.$plugin.'/routes.php')) {
+                        require_once $pluginRoutesPath;
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * Load routes.php files from user-enabled plugins.
+     *
+     * Skipped before install (no plugin table yet). The installed check works without a web
+     * session so console runs (route:list, scheduled jobs generating named routes) get them too.
+     */
+    private static function loadUserPluginRoutes(): void
+    {
+        if (! Installation::isInstalled()) {
+            return;
+        }
+
+        try {
+            $pluginService = app()->make(\Shiri\Core\Plugins\Plugins::class);
+            $enabledPluginPaths = $pluginService->getEnabledPluginPaths();
+
+            Route::middleware([CheckPermissions::class])->group(function () use ($enabledPluginPaths) {
+                foreach ($enabledPluginPaths as $pluginInfo) {
+                    $routesPath = $pluginInfo['path'].'/routes.php';
+
+                    if (file_exists($routesPath)) {
+                        require_once $routesPath;
+                    }
+                }
+            });
+        } catch (\Exception $e) {
+            // Silently continue if plugin service is unavailable
+        }
+    }
+
+    /**
+     * Get all domain paths (same as EventDispatcher::getDomainPaths but public for reuse)
+     */
+    public static function getDomainPaths(): array
+    {
+        return collect(glob(APP_ROOT.'/app/Domain'.'/*', GLOB_ONLYDIR))->all();
+    }
+}

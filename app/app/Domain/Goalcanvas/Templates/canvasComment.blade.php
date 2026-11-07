@@ -1,0 +1,57 @@
+@extends($layout)
+@section('content')
+
+@php
+    // An unsaved item ('id' => '') has no discussion yet.
+    $id = $canvasItem['id'] ?? '';
+@endphp
+
+<script type="text/javascript">
+    window.onload = function() {
+        if (!window.jQuery) {
+            //It's not a modal
+            location.href = "{{ BASE_URL }}/goalcanvas/showCanvas?showModal={{ $canvasItem['id'] }}";
+        }
+    }
+</script>
+
+<div class="showDialogOnLoad" style="display:none;">
+
+    <h4 class="widgettitle title-light" style="padding-bottom: 0">
+        <i class="fas {{ $canvasTypes[$canvasItem['box']]['icon'] }}"></i>
+        {{ $canvasTypes[$canvasItem['box']]['title'] }}
+    </h4>
+    <hr style="margin-top: 5px; margin-bottom: 15px;">
+
+    <h5 style="padding-left: 40px"><strong>{{ $canvasItem['description'] }}</strong></h5>
+
+    @if ($id !== '')
+    <br />
+    <input type="hidden" name="comment" value="1" />
+    <x-global::elements.section-header icon="fa fa-comments">{{ __('subtitles.discussion') }}</x-global::elements.section-header>
+    @include('comments::submodules.generalComment', ['formUrl' => '/goalcanvas/editCanvasComment/' . $id])
+    @endif
+
+</div>
+
+
+<script type="text/javascript">
+jQuery(document).ready(function() {
+
+   if (window.shiri && window.shiri.tiptapController) {
+       shiri.tiptapController.initSimpleEditor();
+   }
+
+   @if(!$login::userIsAtLeast($roles::$editor))
+       shiri.authController.makeInputReadonly(".nyroModalCont");
+
+   @endif;
+
+   @if($login::userHasRole([$roles::$commenter]))
+       shiri.commentsController.enableCommenterForms();
+   @endif;
+
+})
+</script>
+
+@endsection
