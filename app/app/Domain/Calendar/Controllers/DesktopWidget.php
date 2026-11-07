@@ -133,11 +133,15 @@ class DesktopWidget extends Controller
 
         $prefs = $this->prefs->all($userId);
 
-        // 月历下面那条「重要节点」：未来节点按天数升序取前三个，已过去的不上浮层
+        // 右侧栏：和主窗口一样的三组节点（近期 / 遥远未来 / 已过去）
+        // 底部横条是窄卡退化形态，只留未来最近的三个
+        $msView = $this->milestones->view();
         $msItems = array_values(array_filter(
-            $this->milestones->view()['all'],
+            $msView['all'],
             fn (array $m): bool => $m['bucket'] !== 'past'
         ));
+        $this->tpl->assign('msGroups', $msView['groups']);
+        $this->tpl->assign('msCount', $msView['count']);
         $this->tpl->assign('msItems', array_slice($msItems, 0, 3));
 
         $this->tpl->assign('grid', $this->buildGrid($monthStart, $monthEnd, $now, $dots, $dayItems, $prefs[Prefs::WEEK_START]));
@@ -178,6 +182,11 @@ class DesktopWidget extends Controller
             'markDone' => Lang::t('todos.markDone'),
             'msTitle' => Lang::t('ms.title'),
             'msUnit' => Lang::t('ms.unit'),
+            'msToday' => Lang::t('ms.today'),
+            'msEmpty' => Lang::t('ms.empty'),
+            'msSoon' => Lang::t('ms.soon'),
+            'msFar' => Lang::t('ms.far'),
+            'msPast' => Lang::t('ms.past'),
         ]);
         $this->tpl->assign('defaultProjectId', $this->board->defaultProjectId($userId));
 

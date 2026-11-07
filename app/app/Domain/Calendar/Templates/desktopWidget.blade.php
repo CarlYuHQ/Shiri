@@ -33,7 +33,9 @@
         </div>
     </header>
 
-    <div class="rb-w-cal">
+    <div class="rb-w-stage">
+        <div class="rb-w-main">
+            <div class="rb-w-cal">
         <div class="rb-w-dow">
             @php
                 $allDow = \Shiri\Domain\Calendar\Support\Lang::isEnglish()
@@ -136,6 +138,48 @@
                 <a class="rb-w-more" href="shiri://full">{{ str_replace('{n}', $moreCount, $lt['more']) }}</a>
             @endif
         @endif
+    </div>
+
+        </div>
+
+        {{-- 右侧栏：和主窗口日历页一致的三组节点，大卡（≥820px）显示 --}}
+        <aside class="rb-w-ms-side">
+            <div class="rb-w-ms-side-head">
+                <span>{{ $lt['msTitle'] }}</span>
+                <span class="rb-w-ms-side-count">{{ $msCount }}</span>
+            </div>
+            <div class="rb-w-ms-side-list">
+                @php
+                    $msLabels = ['soon' => $lt['msSoon'], 'far' => $lt['msFar'], 'past' => $lt['msPast']];
+                @endphp
+                @foreach ($msLabels as $bucket => $label)
+                    @if (count($msGroups[$bucket]) > 0)
+                        <div class="rb-w-ms-group rb-w-ms-group--{{ $bucket }}">
+                            <div class="rb-w-ms-group-label">{{ $label }}</div>
+                            @foreach ($msGroups[$bucket] as $m)
+                                <div class="rb-w-ms-item-v" title="{{ $m['dateLabel'] }}">
+                                    <div class="rb-w-ms-v-text">
+                                        <div class="rb-w-ms-v-title">{{ $m['title'] }}</div>
+                                        <div class="rb-w-ms-v-date">{{ $m['dateLabel'] }}</div>
+                                    </div>
+                                    <div class="rb-w-ms-v-count">
+                                        @if ($m['num'] !== '')
+                                            <b>{{ $m['num'] }}</b><i>{{ $lt['msUnit'] }}</i>
+                                        @else
+                                            <span class="rb-w-ms-v-today">{{ $lt['msToday'] }}</span>
+                                        @endif
+                                    </div>
+                                </div>
+                            @endforeach
+                        </div>
+                    @endif
+                @endforeach
+
+                @if ($msCount === 0)
+                    <p class="rb-w-ms-empty">{{ $lt['msEmpty'] }}</p>
+                @endif
+            </div>
+        </aside>
     </div>
 
 </div>

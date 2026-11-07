@@ -389,6 +389,130 @@ body.rb-widget-body {
     }
 }
 
+/* ── 两栏：左月历 + 右节点栏 ────────────────────────────────────────────
+   大卡（≥820px）显示右侧栏；窄卡退回上下排，改用底部横条。 */
+.rb-w-stage {
+    display: flex;
+    flex: 1 1 0;
+    gap: clamp(12px, 2vh, 20px);
+    min-height: 0;
+}
+
+.rb-w-main {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+}
+
+.rb-w-ms-side {
+    border-left: 1px solid var(--rb-line);
+    box-sizing: border-box;
+    display: flex;
+    flex: 0 0 clamp(196px, 22%, 240px);
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-left: clamp(10px, 1.6vh, 16px);
+    scrollbar-width: thin;
+}
+
+.rb-w-ms-side-head {
+    align-items: center;
+    color: var(--lt-text);
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+    justify-content: space-between;
+    font-size: clamp(11px, 1.8vh, 15px);
+    font-weight: 600;
+    letter-spacing: .03em;
+    padding: clamp(2px, .6vh, 6px) 0 clamp(6px, 1.2vh, 12px);
+}
+
+.rb-w-ms-side-count {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(9px, 1.4vh, 12px);
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+}
+
+.rb-w-ms-group-label {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(9px, 1.3vh, 11px);
+    letter-spacing: .08em;
+    margin: clamp(8px, 1.4vh, 14px) 0 clamp(3px, .6vh, 6px);
+}
+
+.rb-w-ms-item-v {
+    align-items: baseline;
+    border-bottom: 1px solid var(--rb-line);
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+    padding: clamp(5px, 1vh, 9px) 0;
+}
+
+.rb-w-ms-group--past .rb-w-ms-item-v {
+    opacity: .55;
+}
+
+.rb-w-ms-v-text {
+    min-width: 0;
+}
+
+.rb-w-ms-v-title {
+    color: var(--lt-text);
+    font-size: clamp(11px, 1.7vh, 14px);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.rb-w-ms-v-date {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(9px, 1.4vh, 12px);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+}
+
+.rb-w-ms-v-count {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.rb-w-ms-v-count b {
+    color: var(--lt-accent, #c0512f);
+    font-size: clamp(16px, 2.6vh, 23px);
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    line-height: 1;
+}
+
+.rb-w-ms-group--far .rb-w-ms-v-count b {
+    color: var(--lt-faint, #b4afa8);
+}
+
+.rb-w-ms-v-count i {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(9px, 1.4vh, 12px);
+    font-style: normal;
+    margin-left: .25em;
+}
+
+.rb-w-ms-v-today {
+    color: var(--lt-accent, #c0512f);
+    font-size: clamp(11px, 1.7vh, 14px);
+    font-weight: 650;
+}
+
+.rb-w-ms-empty {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(10px, 1.6vh, 13px);
+    line-height: 1.6;
+}
+
 /* ── 重要节点条：月历与「今天」之间的一行 ────────────────────────────────
    未来最近的三个节点横排；颜色全走主题变量，夜晚反相后同样可读。 */
 .rb-w-ms {
@@ -450,6 +574,23 @@ body.rb-widget-body {
 /* 小卡（<560px）放不下，只留最近的一个 */
 @media (max-width: 559px) {
     .rb-w-ms-item:nth-child(n+2) {
+        display: none;
+    }
+}
+
+/* 大卡：右侧栏上场、底部横条收起；窄卡反过来（右侧栏藏起来，改横条） */
+@media (min-width: 820px) {
+    .rb-w-ms {
+        display: none;
+    }
+}
+
+@media (max-width: 819px) {
+    .rb-w-stage {
+        flex-direction: column;
+    }
+
+    .rb-w-ms-side {
         display: none;
     }
 }
