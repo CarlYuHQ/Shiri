@@ -280,6 +280,30 @@ class Lang
             'settings.save' => ['zh' => '保存', 'en' => 'Save'],
             'settings.saved' => ['zh' => '已保存', 'en' => 'Saved'],
             'settings.saving' => ['zh' => '保存中…', 'en' => 'Saving…'],
+
+            // 日历右侧栏：重要时间节点 / 遥远未来
+            // 倒计时拆成三段（前缀 / 数字 / 后缀），数字单独放大；间距由 CSS 控制，
+            // 字典里不留空格，免得 Blade 转义或 HTML 折叠后中英语序错位。
+            'ms.title' => ['zh' => '重要时间节点', 'en' => 'Important Dates'],
+            'ms.soon' => ['zh' => '近期', 'en' => 'Coming up'],
+            'ms.far' => ['zh' => '遥远未来', 'en' => 'Further out'],
+            'ms.past' => ['zh' => '已过去', 'en' => 'Passed'],
+            'ms.leftPre' => ['zh' => '还有', 'en' => ''],
+            'ms.leftPost' => ['zh' => '天', 'en' => 'days left'],
+            'ms.agoPre' => ['zh' => '已过去', 'en' => ''],
+            'ms.agoPost' => ['zh' => '天', 'en' => 'days ago'],
+            'ms.today' => ['zh' => '就是今天', 'en' => 'Today'],
+            'ms.empty' => ['zh' => '还没有节点，点下方「添加」放一个。', 'en' => 'Nothing here yet — add one below.'],
+            'ms.add' => ['zh' => '添加', 'en' => 'Add'],
+            'ms.name' => ['zh' => '节点名称', 'en' => 'Name'],
+            'ms.nameEn' => ['zh' => '英文名（可选）', 'en' => 'English name (optional)'],
+            'ms.date' => ['zh' => '日期', 'en' => 'Date'],
+            'ms.save' => ['zh' => '保存', 'en' => 'Save'],
+            'ms.cancel' => ['zh' => '取消', 'en' => 'Cancel'],
+            'ms.delete' => ['zh' => '删除', 'en' => 'Delete'],
+            'ms.deleteConfirm' => ['zh' => '删除这个节点？', 'en' => 'Delete this date?'],
+            'ms.err' => ['zh' => '名称或日期不合法', 'en' => 'Check the name and date'],
+            'ms.saving' => ['zh' => '保存中…', 'en' => 'Saving…'],
         ];
     }
 }

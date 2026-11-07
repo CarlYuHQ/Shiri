@@ -5,6 +5,7 @@
 @php
     // The calendar's last view (saved by the view select via Api.Api.setSubmenuState).
     $myCalendarView = app(\Shiri\Core\UI\UiState::class)->get('myCalendarView', 'dayGridMonth');
+    $t = static fn (string $k): string => \Shiri\Domain\Calendar\Support\Lang::t($k);
 @endphp
 
 <x-global::layout.page-header icon="fa {{ $tpl->getModulePicture() }}" :eyebrow="__('headline.calendar')">
@@ -70,7 +71,65 @@
                 <x-global::forms.button tag="a" link="#/calendar/export" contentRole="default">{{ __('links.export') }}</x-global::forms.button>
             </div>
         </div>
-        <div id="calendar"></div>
+        {{-- 日历 + 右侧「重要时间节点」栏。包一层 cal-stage 做横向 flex，
+             工具条留在上面横跨整行，不受影响。 --}}
+        <div class="cal-stage">
+            <div id="calendar"></div>
+
+            <aside class="ms-panel" id="ms-panel">
+                <details class="ms-details" open>
+                    <summary class="ms-head">
+                        <span class="ms-head-title">{{ $t('ms.title') }}</span>
+                        <span class="ms-head-count">{{ $msCount }}</span>
+                    </summary>
+
+                    <div class="ms-body">
+                        @foreach (['soon', 'far', 'past'] as $bucket)
+                            @if (count($msGroups[$bucket]) > 0)
+                                <section class="ms-group ms-group--{{ $bucket }}">
+                                    <h3 class="ms-group-label">{{ $t('ms.'.$bucket) }}</h3>
+                                    <ul class="ms-list">
+                                        @foreach ($msGroups[$bucket] as $m)
+                                            <li class="ms-item ms-item--{{ $m['bucket'] }}" data-id="{{ $m['id'] }}">
+                                                <div class="ms-item-top">
+                                                    <div class="ms-item-text">
+                                                        <div class="ms-item-date">{{ $m['dateLabel'] }}</div>
+                                                        <div class="ms-item-title">{{ $m['title'] }}</div>
+                                                    </div>
+                                                    <button type="button" class="ms-del"
+                                                            title="{{ $t('ms.delete') }}"
+                                                            aria-label="{{ $t('ms.delete') }}">&times;</button>
+                                                </div>
+                                                <div class="ms-countdown">
+                                                    <span class="ms-pre">{{ $m['pre'] }}</span><span class="ms-num">{{ $m['num'] }}</span><span class="ms-post">{{ $m['post'] }}</span>
+                                                </div>
+                                            </li>
+                                        @endforeach
+                                    </ul>
+                                </section>
+                            @endif
+                        @endforeach
+
+                        @if ($msCount === 0)
+                            <p class="ms-empty">{{ $t('ms.empty') }}</p>
+                        @endif
+                    </div>
+                </details>
+
+                <button type="button" class="ms-add-btn" id="ms-add-btn">+ {{ $t('ms.add') }}</button>
+
+                <form class="ms-form" id="ms-form" hidden>
+                    <label><span>{{ $t('ms.name') }}</span><input type="text" name="title" maxlength="120" required></label>
+                    <label><span>{{ $t('ms.nameEn') }}</span><input type="text" name="titleEn" maxlength="120"></label>
+                    <label><span>{{ $t('ms.date') }}</span><input type="date" name="date" required></label>
+                    <div class="ms-form-actions">
+                        <button type="submit" class="ms-submit">{{ $t('ms.save') }}</button>
+                        <button type="button" class="ms-cancel">{{ $t('ms.cancel') }}</button>
+                    </div>
+                    <p class="ms-form-err" id="ms-form-err" hidden></p>
+                </form>
+            </aside>
+        </div>
     </x-global::layout.content-box>
 
 
@@ -362,6 +421,8 @@
 @push('styles')
 {{-- 本机补丁：日历高度与条目排版（见 public/dist/css/shiri-calendar.css） --}}
 <link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-calendar.css?v={{ $ltV('/dist/css/shiri-calendar.css') }}">
+{{-- 右侧「重要时间节点」栏 --}}
+<link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-milestones.css?v={{ $ltV('/dist/css/shiri-milestones.css') }}">
 @endpush
 
 @push('scripts')
@@ -369,6 +430,8 @@
 <script src="{{ BASE_URL }}/dist/js/shiri-quickdelete.js?v={{ $ltV('/dist/js/shiri-quickdelete.js') }}"></script>
 {{-- 本机补丁：点日历空白处就地新建日程（见 public/dist/js/shiri-quickadd.js） --}}
 <script src="{{ BASE_URL }}/dist/js/shiri-quickadd.js?v={{ $ltV('/dist/js/shiri-quickadd.js') }}"></script>
+{{-- 右侧栏：添加 / 删除节点 --}}
+<script src="{{ BASE_URL }}/dist/js/shiri-milestones.js?v={{ $ltV('/dist/js/shiri-milestones.js') }}"></script>
 @endpush
 
 @endsection

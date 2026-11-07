@@ -144,6 +144,28 @@
   只存字典会出现「导航英文、日历中文」，所以每次渲染前调 `Lang::applyToShiri()`
   （`layouts/app.blade.php` 第一行 + 五个页面控制器开头），把偏好同步成 `Language::setLanguage()`。
   `session('usersettings.language')` 与偏好一致时不重复写
+
+## 右侧节点栏（重要时间节点）
+
+日历页右侧一栏，放重要日期和遥远未来的日子，按「还有多少天」倒计时。
+
+- **分组**：近期（≤365 天）→ 遥远未来（>365 天）→ 已过去（置灰沉底），
+  组内按天数升序，刚过去的排最前；标题栏的数字是总条数，`<details>` 可整栏折叠
+- **倒计时是三段拼的**（前缀 / 数字 / 后缀），数字单独放大：中文「还有 **21** 天」、
+  英文「**21** days left」，今天的条目没有数字、直接放大「就是今天 / Today」。
+  拆段是为了中英语序都能拼对，字典里不留空格，间距交给 CSS
+- **天数按本机日期算**：服务端 PHP 可能是 UTC，`MilestoneBoard::TZ` 显式钉到
+  `Asia/Shanghai`，`today` 与目标日期都取整天，跨天不会出现半天的偏差
+- **数据**：`zp_milestones(userId, title, titleEn, targetDate)`，代码 `CREATE TABLE IF NOT EXISTS`
+  自建；**只在首次建表时**插四条「示例 ·」种子（覆盖近期/遥远/已过去四种状态），
+  之后删光了不会自己长回来
+- **RPC**：`shiri.rpc.Calendar.Milestones.{get,add,remove}`（`Services/Milestones.php`，
+  单数组参数照例包 `{params:{...}}`）；添加 / 删除成功后整页重载，倒计时永远不会过期
+- **双语**：节点标题存中英两份（`title` / `titleEn`），英文界面优先显示英文名；
+  分组与倒计时文案在 `Lang.php` 的 `ms.*` 键
+- 文件：`Support/MilestoneBoard.php`（表与 CRUD）、`Services/Milestones.php`（RPC 与渲染数据）、
+  `public/dist/css/shiri-milestones.css`、`public/dist/js/shiri-milestones.js`；
+  侧栏在 `.cal-stage` 里与 `#calendar` 横向并排，窗口 <820px 才堆到日历下面
 - JS 里的文案也从字典来：模板注入 `window.RB_LANG = Lang::flat()`，脚本用 `T('todos.markDone')`
   取，兜底值仍是中文——脚本单独跑不会甩出一串 key
 - 浮层和主窗口是两个 webview，设置改完不会自动刷新：浮层每 30 秒问一次

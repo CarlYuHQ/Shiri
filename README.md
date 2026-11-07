@@ -36,6 +36,7 @@ Calendar apps have gotten heavy: sign-in screens, dashboards, project management
 | **Plans** | Recurring tasks without cron | Generates the next 21 days on page open, deduplicated by a unique key — missed days are backfilled |
 | **Stats** | See your rhythm at a glance | Completions, overdue, streaks; measured by each todo's last-updated time |
 | **Settings** | Everything adjustable | UI language (中文 / English), time-of-day theme, card opacity, week start |
+| **Milestones** | Important dates at the right | A sidebar next to the calendar: countdown in days, grouped into coming up / further out / passed |
 | **Desktop widget** | A calendar beside the wallpaper | Translucent card with a live opacity slider; settings sync within 30 seconds |
 
 | Calendar | Todos |
