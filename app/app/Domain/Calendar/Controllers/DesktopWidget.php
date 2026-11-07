@@ -10,6 +10,7 @@ use Shiri\Domain\Calendar\Support\CardTheme;
 use Shiri\Domain\Calendar\Support\Lang;
 use Shiri\Domain\Calendar\Support\Prefs;
 use Shiri\Domain\Calendar\Support\TodoBoard;
+use Shiri\Domain\Calendar\Services\Milestones;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -26,11 +27,14 @@ class DesktopWidget extends Controller
 
     private Prefs $prefs;
 
-    public function init(TodoBoard $board, CalendarService $calendar, Prefs $prefs): void
+    private Milestones $milestones;
+
+    public function init(TodoBoard $board, CalendarService $calendar, Prefs $prefs, Milestones $milestones): void
     {
         $this->board = $board;
         $this->calendar = $calendar;
         $this->prefs = $prefs;
+        $this->milestones = $milestones;
     }
 
     #[RequiresPermission(CalendarPermissions::VIEW)]
@@ -129,6 +133,13 @@ class DesktopWidget extends Controller
 
         $prefs = $this->prefs->all($userId);
 
+        // 月历下面那条「重要节点」：未来节点按天数升序取前三个，已过去的不上浮层
+        $msItems = array_values(array_filter(
+            $this->milestones->view()['all'],
+            fn (array $m): bool => $m['bucket'] !== 'past'
+        ));
+        $this->tpl->assign('msItems', array_slice($msItems, 0, 3));
+
         $this->tpl->assign('grid', $this->buildGrid($monthStart, $monthEnd, $now, $dots, $dayItems, $prefs[Prefs::WEEK_START]));
         // 卡片默认 1040×790，今天这块放 5 行；再多就折叠成「还有 N 件」
         $this->tpl->assign('todayItems', array_slice($todayItems, 0, 5));
@@ -165,6 +176,8 @@ class DesktopWidget extends Controller
             'more' => Lang::t('widget.more'),
             'overdue' => Lang::t('widget.overdue'),
             'markDone' => Lang::t('todos.markDone'),
+            'msTitle' => Lang::t('ms.title'),
+            'msUnit' => Lang::t('ms.unit'),
         ]);
         $this->tpl->assign('defaultProjectId', $this->board->defaultProjectId($userId));
 

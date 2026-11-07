@@ -470,7 +470,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func load(_ url: URL) {
-        webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 20))
+        // 本机服务，每次都绕过 WKWebView 的启发式缓存：
+        // 否则改完模板，窗口还拿着旧 HTML 配新 CSS，页面看不出变化
+        webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20))
     }
 
     private func showOverlay(_ text: String) {

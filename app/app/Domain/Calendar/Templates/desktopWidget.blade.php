@@ -85,6 +85,20 @@
         @endforeach
     </div>
 
+    {{-- 重要节点：未来最近的三个，横排一行；没有就不渲染这行 --}}
+    @if (count($msItems) > 0)
+        <div class="rb-w-ms">
+            <span class="rb-w-ms-label">{{ $lt['msTitle'] }}</span>
+            <span class="rb-w-ms-items">
+                @foreach ($msItems as $m)
+                    <span class="rb-w-ms-item" title="{{ $m['dateLabel'] }}">
+                        <em>{{ $m['title'] }}</em><b>{{ $m['num'] }}</b><i>{{ $lt['msUnit'] }}</i>
+                    </span>
+                @endforeach
+            </span>
+        </div>
+    @endif
+
     <div class="rb-w-today">
         <div class="rb-w-today-head">
             <span>{{ str_replace('{date}', $todayLabel, $lt['today']) }}</span>

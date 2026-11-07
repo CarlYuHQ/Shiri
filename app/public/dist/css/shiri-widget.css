@@ -389,6 +389,71 @@ body.rb-widget-body {
     }
 }
 
+/* ── 重要节点条：月历与「今天」之间的一行 ────────────────────────────────
+   未来最近的三个节点横排；颜色全走主题变量，夜晚反相后同样可读。 */
+.rb-w-ms {
+    align-items: baseline;
+    display: flex;
+    flex: 0 0 auto;
+    gap: clamp(8px, 1.6vh, 14px);
+    margin-top: clamp(6px, 1.2vh, 12px);
+    min-width: 0;
+    overflow: hidden;
+}
+
+.rb-w-ms-label {
+    color: var(--lt-faint, #b4afa8);
+    flex: 0 0 auto;
+    font-size: clamp(10px, 1.5vh, 13px);
+    letter-spacing: .06em;
+    white-space: nowrap;
+}
+
+.rb-w-ms-items {
+    display: flex;
+    flex: 1 1 auto;
+    gap: clamp(10px, 2.4vh, 22px);
+    min-width: 0;
+    overflow: hidden;
+}
+
+.rb-w-ms-item {
+    align-items: baseline;
+    color: var(--lt-text);
+    display: flex;
+    gap: .4em;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.rb-w-ms-item em {
+    font-style: normal;
+    font-size: clamp(11px, 1.7vh, 14px);
+    opacity: .72;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rb-w-ms-item b {
+    color: var(--lt-accent, #c0512f);
+    font-size: clamp(13px, 2.1vh, 18px);
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+}
+
+.rb-w-ms-item i {
+    color: var(--lt-faint, #b4afa8);
+    font-size: clamp(9px, 1.4vh, 12px);
+    font-style: normal;
+}
+
+/* 小卡（<560px）放不下，只留最近的一个 */
+@media (max-width: 559px) {
+    .rb-w-ms-item:nth-child(n+2) {
+        display: none;
+    }
+}
+
 /* ── 今天的事 ─────────────────────────────────────────────────────────── */
 .rb-w-today {
     border-top: 1px solid var(--rb-line);

@@ -293,6 +293,7 @@ class Lang
             'ms.agoPre' => ['zh' => '已过去', 'en' => ''],
             'ms.agoPost' => ['zh' => '天', 'en' => 'days ago'],
             'ms.today' => ['zh' => '就是今天', 'en' => 'Today'],
+            'ms.unit' => ['zh' => '天', 'en' => 'days'],
             'ms.empty' => ['zh' => '还没有节点，点下方「添加」放一个。', 'en' => 'Nothing here yet — add one below.'],
             'ms.add' => ['zh' => '添加', 'en' => 'Add'],
             'ms.name' => ['zh' => '节点名称', 'en' => 'Name'],
