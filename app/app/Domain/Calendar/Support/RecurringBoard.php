@@ -192,7 +192,13 @@ class RecurringBoard
         $created = 0;
 
         foreach ($rules as $rule) {
-            $startsOn = CarbonImmutable::parse($rule['startsOn'])->startOfDay();
+            // 必须按**用户时区**解析 startsOn。startsOn 存的是纯日期（Y-m-d），
+            // CarbonImmutable::parse() 不带时区会落到 app 默认时区（UTC）的 00:00，
+            // 而 $today 是用户时区的 00:00（UTC+8 下等于前一天 16:00 UTC）。
+            // 两者比较就变成「11-09 00:00+08 < 11-09 00:00 UTC」= true，
+            // 于是每条规则**首次**该出现的日子被当成「还没开始」跳过 ——
+            // 「每周一」从 11-09 开始，第一条却生成在 11-16。
+            $startsOn = CarbonImmutable::parse($rule['startsOn'], $now->getTimezone())->startOfDay();
 
             for ($i = 0; $i <= self::HORIZON_DAYS; $i++) {
                 $day = $today->addDays($i);
