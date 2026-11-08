@@ -81,12 +81,24 @@
     border-radius: 6px;
     padding: 2px 6px !important;
     gap: 4px;
-    background: color-mix(in srgb, currentColor 9%, transparent);
+    /* 事件自选的颜色通过 --ev 传进来（.shiri-ev-* 类），没选就跟着原来的 currentColor 走 */
+    color: var(--ev, currentColor);
+    background: color-mix(in srgb, var(--ev, currentColor) 10%, transparent);
 }
 
 #calendar .fc-daygrid-dot-event:hover {
-    background: color-mix(in srgb, currentColor 17%, transparent);
+    background: color-mix(in srgb, var(--ev, currentColor) 18%, transparent);
 }
+
+/* 事件颜色令牌 → 实际色值。必须和 Services\Calendar::EVENT_COLORS 的 hex 保持一致：
+   FullCalendar 会把颜色解析成 rgb 塞进 --fc-event-* 变量，但 dot event 不吃那套，
+   所以这里再用 class 给一次。 */
+#calendar .shiri-ev-blue { --ev: #1f6fb2; }
+#calendar .shiri-ev-green { --ev: #2e7d32; }
+#calendar .shiri-ev-amber { --ev: #b26a00; }
+#calendar .shiri-ev-red { --ev: #c0392b; }
+#calendar .shiri-ev-purple { --ev: #6a3d9a; }
+#calendar .shiri-ev-teal { --ev: #0f7b6c; }
 
 #calendar .fc-daygrid-event-dot {
     margin-right: 1px;
@@ -202,4 +214,49 @@
 /* 上下月的日期淡一些，不再和本月抢注意力 */
 #calendar .fc-day-other .fc-daygrid-day-number {
     opacity: .35;
+}
+
+/* ── 事件颜色选择（新增/编辑弹窗） ────────────────────────────────────────
+   一排色点，点谁选谁。radio 本身透明铺在色点上，键盘也能用方向键切换。 */
+.lt-swatches {
+    align-items: center;
+    display: flex;
+    gap: 9px;
+    margin: 4px 0 14px;
+}
+
+.lt-swatch {
+    cursor: pointer;
+    display: inline-flex;
+    height: 22px;
+    position: relative;
+    width: 22px;
+}
+
+.lt-swatch input {
+    appearance: none;
+    border: 0;
+    cursor: pointer;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    position: absolute;
+}
+
+.lt-swatch i {
+    background: var(--swatch);
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .14);
+    display: block;
+    height: 22px;
+    pointer-events: none;
+    width: 22px;
+}
+
+.lt-swatch input:checked + i {
+    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px rgba(0, 0, 0, .38);
+}
+
+.lt-swatch input:focus-visible + i {
+    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px var(--lt-text, #333);
 }

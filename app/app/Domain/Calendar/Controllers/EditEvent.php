@@ -59,6 +59,8 @@ class EditEvent extends Controller
             $this->tpl->setNotification('notification.please_enter_title', 'error');
         }
 
-        return Frontcontroller::redirect(BASE_URL.'/calendar/editEvent/'.$params['id']);
+        // 同 AddEvent：带 closeModal 回来，片段里的脚本关掉弹窗，日历就地刷新。
+        // 不带的话 nyroModal 会把重新渲染的表单当成成功响应塞回弹窗里，看着像没保存。
+        return Frontcontroller::redirect(BASE_URL.'/calendar/editEvent/'.$params['id'].'?closeModal=1');
     }
 }

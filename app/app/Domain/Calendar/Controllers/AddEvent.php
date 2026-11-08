@@ -53,7 +53,10 @@ class AddEvent extends Controller
         if (is_numeric($result) === true) {
             $this->tpl->setNotification('notification.event_created_successfully', 'success');
 
-            return Frontcontroller::redirect(BASE_URL.'/calendar/editEvent/'.$result);
+            // 回带 closeModal：片段里的脚本关掉弹窗，日历由 modals.js 的 softReload 就地刷新。
+            // 原来跳 /calendar/editEvent/{id}，nyroModal 会把编辑页当成成功响应注入弹窗，
+            // 表现就是「点了保存弹窗不消失，还变成了编辑事件」。
+            return Frontcontroller::redirect(BASE_URL.'/calendar/addEvent?closeModal=1');
         } else {
             $this->tpl->setNotification('notification.please_enter_title', 'error');
             $this->tpl->assign('values', $params);

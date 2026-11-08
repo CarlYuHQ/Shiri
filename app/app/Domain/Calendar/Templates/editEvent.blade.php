@@ -55,6 +55,26 @@
     @endif
     />
 
+    {{-- 颜色：令牌存在 zp_calendar.kind，取值为空即跟主题默认色 --}}
+    @php
+        $palette = \Shiri\Domain\Calendar\Services\Calendar::EVENT_COLORS;
+        $picked = (string) ($values['kind'] ?? '');
+        $picked = $picked === '' ? 'default' : $picked;
+    @endphp
+    <div class="par">
+        <label class="lt-label">{!! __('label.color') !!}</label>
+        <div class="lt-swatches">
+            @foreach ($palette as $colorKey => $colorMeta)
+                <label class="lt-swatch" title="{{ $colorMeta['label'] }}">
+                    <input type="radio" name="color" value="{{ $colorKey }}"
+                           aria-label="{{ $colorMeta['label'] }}"
+                           @if ($picked === $colorKey) checked="checked" @endif />
+                    <i style="--swatch: {{ $colorMeta['hex'] !== '' ? $colorMeta['hex'] : 'var(--accent1)' }}"></i>
+                </label>
+            @endforeach
+        </div>
+    </div>
+
     @dispatchEvent('beforeSubmitButton')
 
     <div class="clear"></div>
@@ -70,10 +90,18 @@
 </form>
 
 @once
-@push('scripts')
 <script type="text/javascript">
-    // 日期输入已换成原生 type=date，不再挂 jQuery UI datepicker
+    // 日期输入已换成原生 type=date，不再挂 jQuery UI datepicker。
+    // 脚本内联而不是 push 到 scripts 栈：这是 partial 渲染，片段布局里没有那个栈，
+    // push 进去的内容会被直接丢掉（nyroModal 会执行片段里的内联 script）。
     jQuery(document).ready(function() {
+        @if (isset($_GET['closeModal']))
+        // 保存成功后服务端回带 closeModal：关掉弹窗，
+        // 日历由 modals.js 的 softReload 就地刷新。
+        if (jQuery.nmTop()) { jQuery.nmTop().close(); }
+        return;
+        @endif
+
         var from = document.getElementById('event_date_from');
         var to = document.getElementById('event_date_to');
         if (!from || !to) { return; }
@@ -82,7 +110,6 @@
         });
     });
 </script>
-@endpush
 @endonce
 
 @endsection

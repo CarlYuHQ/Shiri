@@ -39,6 +39,25 @@ class Calendar extends BaseService
     /** A valid, event-less calendar: served when a feed is unavailable so the client parser never sees an empty body. */
     public const EMPTY_ICAL_CALENDAR = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Shiri//External Calendar//EN\r\nEND:VCALENDAR\r\n";
 
+    /**
+     * 事件可选颜色。键存在 zp_calendar.kind（原来闲置的列）。
+     *
+     * 这里必须是**具体色值**，不能写 CSS 变量：FullCalendar 会把颜色当参数解析成
+     * rgb 再塞进 --fc-event-* 变量，`var(--green)` 它解析不了，会静默退回主题默认色
+     * （看起来就是「选了色没生效」）。默认项留空 = 沿用主题的 --accent1。
+     *
+     * @var array<string, array{label: string, hex: string}>
+     */
+    public const EVENT_COLORS = [
+        'default' => ['label' => '默认', 'hex' => ''],
+        'blue' => ['label' => '蓝', 'hex' => '#1f6fb2'],
+        'green' => ['label' => '绿', 'hex' => '#2e7d32'],
+        'amber' => ['label' => '橙', 'hex' => '#b26a00'],
+        'red' => ['label' => '红', 'hex' => '#c0392b'],
+        'purple' => ['label' => '紫', 'hex' => '#6a3d9a'],
+        'teal' => ['label' => '青', 'hex' => '#0f7b6c'],
+    ];
+
     private CalendarRepository $calendarRepo;
 
     private LanguageCore $language;
@@ -141,6 +160,7 @@ class Calendar extends BaseService
     #[RequiresPermission(CalendarPermissions::CREATE)]
     public function addEvent(array $values): int|false
     {
+        $values = $this->normalizeEventRange($values);
         $values['allDay'] = $values['allDay'] ?? false;
 
         if (isset($values['dateFrom'])) {
@@ -187,6 +207,52 @@ class Calendar extends BaseService
     }
 
     /**
+     * 日期/时间留空时的兜底，新增和编辑共用。
+     *
+     * 1. 结束日期空着 → 跟开始日期同一天。空日期会让 parseUserDateTime() 解析不出东西，
+     *    早期就是这么存进 NULL 的，最后变成日历上查不到的幽灵行。
+     * 2. 同一天、结束时间空着 → 用开始时间。空时间会落到 midDay()（12:00），
+     *    于是「14:15 开始」的事件结束在 12:00 —— 区间是反的，画不出来。
+     * 3. 开始日期空着 → 落到今天，宁可在今天建一条也不要建一条没有日期的。
+     *
+     * @param  array<string, mixed>  $values
+     * @return array<string, mixed>
+     */
+    private function normalizeEventRange(array $values): array
+    {
+        // 颜色存 kind 列，只接受调色板里的键，其他值一律落回默认（null = 跟主题走）。
+        // 只在调用方真的传了颜色时才动它，别把拖拽/局部更新里的既有颜色抹掉。
+        if (array_key_exists('color', $values) || array_key_exists('kind', $values)) {
+            $color = trim((string) ($values['color'] ?? $values['kind'] ?? ''));
+            $values['kind'] = ($color !== '' && $color !== 'default' && isset(self::EVENT_COLORS[$color]))
+                ? $color
+                : null;
+        }
+
+        $dateFrom = trim((string) ($values['dateFrom'] ?? ''));
+        $dateTo = trim((string) ($values['dateTo'] ?? ''));
+
+        if ($dateFrom === '') {
+            $values['dateFrom'] = dtHelper()->userNow()->format('Y-m-d');
+            $dateFrom = (string) $values['dateFrom'];
+        }
+
+        if ($dateTo === '') {
+            $values['dateTo'] = $dateFrom;
+            $dateTo = $dateFrom;
+        }
+
+        $timeFrom = trim((string) ($values['timeFrom'] ?? ''));
+        $timeTo = trim((string) ($values['timeTo'] ?? ''));
+
+        if ($timeTo === '' && $timeFrom !== '' && $dateTo === $dateFrom) {
+            $values['timeTo'] = $values['timeFrom'];
+        }
+
+        return $values;
+    }
+
+    /**
      * Returns a single event, fail-closed to its owner. The repository fetches by bare id, so
      * without this check any user could read any event by id over RPC; calendar.manage (admin+)
      * is the cross-user override. Soft-denies (returns false) for a foreign event.
@@ -223,6 +289,8 @@ class Calendar extends BaseService
     #[RequiresPermission(CalendarPermissions::EDIT)]
     public function editEvent(array $values): bool
     {
+        $values = $this->normalizeEventRange($values);
+
         if (isset($values['id']) === true) {
             $id = $values['id'];
 
@@ -617,6 +685,10 @@ class Calendar extends BaseService
                 }
             }
 
+            $eventToken = (string) ($value['kind'] ?? '');
+            $eventHex = self::EVENT_COLORS[$eventToken]['hex'] ?? '';
+            $eventColor = $eventHex !== '' ? $eventHex : 'var(--accent1)';
+
             $newValues[] = [
                 'title' => $value['description'],
                 'allDay' => $allDay,
@@ -627,8 +699,12 @@ class Calendar extends BaseService
                 'projectId' => '',
                 'eventType' => 'calendar',
                 'dateContext' => 'plan',
-                'backgroundColor' => 'var(--accent1)',
-                'borderColor' => 'var(--accent1)',
+                'backgroundColor' => $eventColor,
+                'borderColor' => $eventColor,
+                // 只有一个时间的条目（dot event）不吃 backgroundColor，用 class 让 CSS 上色
+                'classNames' => $eventToken !== '' ? ['shiri-ev-'.$eventToken] : [],
+                // 颜色令牌本身也带出去：桌面浮层的 chip 要用它上色
+                'colorKind' => $eventToken,
                 'url' => BASE_URL.'/calendar/showMyCalendar/#/calendar/editEvent/'.$value['id'],
             ];
         }

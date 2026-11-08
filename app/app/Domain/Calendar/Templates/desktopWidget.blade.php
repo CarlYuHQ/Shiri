@@ -69,7 +69,9 @@
                             {{-- 大卡：直接把当天的事写进格子（窄屏由 CSS 换成下面那排圆点） --}}
                             <span class="rb-w-chips">
                                 @foreach ($day['items'] as $item)
-                                    <em class="rb-w-chip" title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
+                                    <em class="rb-w-chip{{ !empty($item['color']) ? ' has-color' : '' }}"
+                                        @if (!empty($item['color'])) style="--chip: {{ $item['color'] }}" @endif
+                                        title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
                                         @if ($item['time'] !== '')
                                             <b>{{ $item['time'] }}</b>
                                         @endif
@@ -133,7 +135,7 @@
                         </li>
                     @else
                         <li class="rb-row is-event" title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
-                            <span class="rb-evdot"></span>
+                            <span class="rb-evdot" @if (!empty($item['color'])) style="--dot: {{ $item['color'] }}" @endif></span>
                             <span class="rb-row-title">{{ $item['title'] }}</span>
                             @if ($item['time'] !== '')
                                 <span class="rb-row-due">{{ $item['time'] }}</span>

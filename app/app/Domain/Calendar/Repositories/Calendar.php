@@ -350,6 +350,8 @@ class Calendar extends RepositoryCore
             'dateTo' => $values['dateTo'],
             'description' => $values['description'],
             'allDay' => $values['allDay'],
+            // 颜色令牌（调色板的键），null = 跟主题默认色
+            'kind' => $values['kind'] ?? null,
         ]);
 
         return $id ? (string) $id : false;
@@ -366,15 +368,22 @@ class Calendar extends RepositoryCore
 
     public function editEvent(array $values, int $id): void
     {
+        $fields = [
+            'dateFrom' => $values['dateFrom'],
+            'dateTo' => $values['dateTo'],
+            'description' => $values['description'],
+            'allDay' => $values['allDay'],
+        ];
+
+        // 没传颜色就别动它（局部更新不该把用户选的颜色抹成默认）
+        if (array_key_exists('kind', $values)) {
+            $fields['kind'] = $values['kind'];
+        }
+
         $this->db->table('zp_calendar')
             ->where('id', $id)
             ->where('userId', session('userdata.id'))
-            ->update([
-                'dateFrom' => $values['dateFrom'],
-                'dateTo' => $values['dateTo'],
-                'description' => $values['description'],
-                'allDay' => $values['allDay'],
-            ]);
+            ->update($fields);
     }
 
     public function delPersonalEvent(int $id): int|false

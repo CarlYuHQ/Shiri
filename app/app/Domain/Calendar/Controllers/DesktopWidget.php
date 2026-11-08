@@ -122,6 +122,8 @@ class DesktopWidget extends Controller
 
             $eventTitle = trim(strip_tags((string) ($event['title'] ?? ''))) ?: '未命名日程';
             $eventDesc = trim(preg_replace('/\s+/u', ' ', strip_tags((string) ($event['description'] ?? ''))));
+            // 事件自选颜色（主窗口里就是这个色），带进 chip 好让两处看起来是同一个
+            $eventColor = (string) (CalendarService::EVENT_COLORS[(string) ($event['colorKind'] ?? '')]['hex'] ?? '');
             // 时间只标在开始那天，续下去的日期只留标题，否则每天重复一个起始时刻会误读成「每天都 09:30 开始」
             $startTime = $this->toUserTime($event['dateFrom'] ?? '');
             $reachesToday = strcmp($todayKey, $rangeStart) >= 0 && strcmp($todayKey, $rangeEnd) <= 0;
@@ -133,6 +135,7 @@ class DesktopWidget extends Controller
                     'time' => $startTime,
                     'description' => $eventDesc,
                     'openBucket' => 'today',
+                    'color' => $eventColor,
                 ];
             }
 
@@ -146,6 +149,7 @@ class DesktopWidget extends Controller
                     'time' => $day === $startDay ? $startTime : '',
                     'title' => $eventTitle,
                     'description' => $eventDesc,
+                    'color' => $eventColor,
                 ];
 
                 $cursor = $cursor->modify('+1 day');

@@ -373,6 +373,19 @@ body.rb-widget-body {
     margin-right: 4px;
 }
 
+/* 日程条目左侧加一道色条：颜色跟主窗口里选的一致。
+   只有日程才有（带 --chip），待办不染色，一眼能分出两类。 */
+.rb-w-chip.has-color::before {
+    background: var(--chip, var(--lt-accent, #c0512f));
+    border-radius: 2px;
+    content: "";
+    display: inline-block;
+    height: .82em;
+    margin-right: 4px;
+    transform: translateY(.5px);
+    width: 2.5px;
+}
+
 .rb-w-chip.is-more {
     background: transparent;
     color: var(--lt-faint, #b4afa8);
@@ -681,7 +694,7 @@ body.rb-widget-body {
 
 /* 日历事件：不能勾选，用一个小小的强调色圆点区分 */
 .rb-row.is-event .rb-evdot {
-    background: var(--lt-accent, #c0512f);
+    background: var(--dot, var(--lt-accent, #c0512f));
     border-radius: 50%;
     flex: 0 0 auto;
     height: 5px;
