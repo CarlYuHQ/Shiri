@@ -89,9 +89,9 @@
     window.__fcTipShow = show;
     window.__fcTipHide = hide;
 
-    // 兜底：不依赖 FullCalendar 的 eventMouseEnter 回调。直接从 DOM 读标题 / 时间，
-    // 描述按标题从页面注入的事件数组里查。冒泡到 document 时 FullCalendar 的回调
-    // 通常已经画过完整卡片了，那种情况下不要重复绘制。
+    // 悬浮只由原生层注入的鼠标坐标驱动，单一状态机：
+    // 不再叠加 mouseover / mousemove / mouseout 多条路径，否则它们互相
+    // hide→show，透明浮层反复重绘看起来就是「窗口抖动」。
     function eventByTitle(title) {
         var list = (window.events && window.events.events) || [];
         for (var i = 0; i < list.length; i++) {
@@ -119,44 +119,25 @@
         }, el);
     }
 
-    document.addEventListener('mouseover', function (e) {
-        var el = e.target && e.target.closest ? e.target.closest('.fc-event') : null;
-        if (!el || el === currentEl) { return; }
-        if (el === lastShowEl && tip && tip.classList.contains('is-on')) { return; }
-        currentEl = el;
-        showFromDom(el);
-    });
+    var lastX = -1, lastY = -1;
 
-    document.addEventListener('mouseout', function (e) {
-        var el = e.target && e.target.closest ? e.target.closest('.fc-event') : null;
-        if (!el) { return; }
-        if (e.relatedTarget && el.contains(e.relatedTarget)) { return; }
-        hide();
-    });
-
-    document.addEventListener('mousedown', hide);
-
-    // 原生层注入：App 不在前台 / 窗口不是 key 时，WebKit 不维护 hover 状态，
-    // mouseover 不派发、光标也不变手型。由 NSTrackingArea(.activeAlways)
-    // 把鼠标坐标推过来，这里用 elementFromPoint 主动命中，不等 hover 状态机。
     function pointerAt(x, y) {
+        // 同坐标不重复命中：静止时原生层已停止注入，这里再挡一层
+        if (x === lastX && y === lastY) { return; }
+        lastX = x; lastY = y;
+
         var el = document.elementFromPoint(x, y);
         var item = el && el.closest ? el.closest('.fc-event') : null;
-        if (!item) {
-            if (currentEl) { currentEl = null; hide(); }
-            return;
-        }
+        if (!item) { if (currentEl) { hide(); } return; }
         if (item === currentEl) { return; }
-        if (item === lastShowEl && tip && tip.classList.contains('is-on')) { return; }
         currentEl = item;
         showFromDom(item);
     }
 
     window.__shiriPointerAt = pointerAt;
-    window.__shiriPointerLeave = function () { currentEl = null; hide(); };
+    window.__shiriPointerLeave = function () { lastX = -1; lastY = -1; hide(); };
 
-    // 只要 mousemove 到得了就立即响应，不必等原生注入那一跳
-    document.addEventListener('mousemove', function (e) {
-        pointerAt(e.clientX, e.clientY);
-    }, { passive: true });
+    // 点击 / 失焦时清理，不参与常规 hover 路径
+    document.addEventListener('mousedown', hide);
+    window.addEventListener('blur', function () { lastX = -1; lastY = -1; hide(); });
 })();

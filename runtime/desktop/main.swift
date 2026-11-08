@@ -89,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// App 不在前台时 WKWebView 不派发 DOM hover；定时读全局鼠标坐标注入页面
     private var hoverTimer: Timer?
     private var hoverInside = false
+    private var lastHoverPoint: NSPoint?
+    private var hoverJSBusy = false
     private var dragMouseStart: NSPoint = .zero
     private var dragWindowStart: NSPoint = .zero
 
@@ -496,10 +498,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !inside {
             if hoverInside {
                 hoverInside = false
+                lastHoverPoint = nil
                 webView.evaluateJavaScript("window.__shiriPointerLeave && window.__shiriPointerLeave()") { _, _ in }
             }
             return
         }
+
+        // 鼠标没动就别再打 JS 桥：透明浮层每次 evaluateJavaScript 都会触发一次
+        // 内容重绘，20Hz 空转会让窗口看起来在抖。同时保证同一时刻只有一个调用在飞。
+        guard !hoverJSBusy else { return }
+        if let last = lastHoverPoint,
+           abs(last.x - screenPoint.x) < 1, abs(last.y - screenPoint.y) < 1 { return }
+        lastHoverPoint = screenPoint
         hoverInside = true
 
         let inWindow = window.convertPoint(fromScreen: screenPoint)
@@ -509,9 +519,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AppKit 坐标原点在左下，DOM 在左上
         let x = p.x
         let y = webView.bounds.height - p.y
+        hoverJSBusy = true
         webView.evaluateJavaScript(
             String(format: "window.__shiriPointerAt && window.__shiriPointerAt(%.1f, %.1f)", x, y)
-        ) { _, _ in }
+        ) { [weak self] _, _ in self?.hoverJSBusy = false }
     }
 
     // MARK: 加载

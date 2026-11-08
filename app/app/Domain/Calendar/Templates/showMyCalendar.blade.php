@@ -351,15 +351,10 @@
                     }
 
                 },
-                eventMouseEnter: function (info) {
-                    window.__fcTipShow(info.event, info.el);
-                },
-                eventMouseLeave: function () {
-                    window.__fcTipHide();
-                },
-                eventDragStart: function () {
-                    window.__fcTipHide();
-                },
+                {{-- 悬浮详情卡由原生层注入鼠标坐标驱动（shiri-calendar-tooltip.js）。
+                     这里不再挂 FullCalendar 的 eventMouseEnter/Leave：
+                     鼠标在条目内移动时 Leave 会先 hide、注入又立刻 show，
+                     多路径互相打断会让透明浮层反复重绘、看起来像窗口抖动。 --}}
 
             }
             );

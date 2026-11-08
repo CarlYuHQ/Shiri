@@ -1,10 +1,14 @@
 /* 桌面浮层悬浮详情卡。
-   浮层窗口是 .nonactivatingPanel：macOS 不会给非激活面板弹原生 title tooltip，
-   所以不能只靠 title 属性，必须自己画一张卡片。
-   用 document 上的事件委托，条目被勾选 / 增删后不用重新绑定。 */
+   浮层是 nonactivatingPanel：macOS 不给非激活面板弹原生 title tooltip，
+   WKWebView 在 App 不在前台时也不派发 mouseover。所以悬浮完全由原生层
+   注入鼠标坐标驱动，页面只做命中测试。
+   单一状态机：不再叠加 mouseover / mousemove / mouseout 多条路径，
+   否则它们会互相 hide→show，透明浮层反复重绘看起来就是「窗口抖动」。 */
 (function () {
     var tip = null;
     var current = null;
+    var lastX = -1, lastY = -1;
+    var SELECTOR = '.rb-w-chip, .rb-row, .rb-w-ms-item-v, .rb-w-ms-item';
 
     function ensure() {
         if (!tip) {
@@ -64,45 +68,22 @@
         current = el;
     }
 
-    function target(e) {
-        if (!e.target || !e.target.closest) { return null; }
-        return e.target.closest('.rb-w-chip, .rb-row, .rb-w-ms-item-v, .rb-w-ms-item');
-    }
-
-    document.addEventListener('mouseover', function (e) {
-        var el = target(e);
-        if (!el || el === current) { return; }
-        show(el);
-    });
-
-    document.addEventListener('mouseout', function (e) {
-        var el = target(e);
-        if (!el) { return; }
-        // 在同一个条目内部移动不算离开
-        if (e.relatedTarget && el.contains(e.relatedTarget)) { return; }
-        hide();
-    });
-
-    document.addEventListener('mousedown', hide);
-    window.addEventListener('blur', hide);
-    window.addEventListener('scroll', hide, true);
-
-    // 浮层是 nonactivatingPanel，永远不会成为 key window：原生层把鼠标坐标
-    // 推过来后自己命中测试，不依赖 WebKit 的 hover 状态机。
     function pointerAt(x, y) {
+        // 同坐标不重复命中：静止时原生层已停止注入，这里再挡一层
+        if (x === lastX && y === lastY) { return; }
+        lastX = x; lastY = y;
+
         var el = document.elementFromPoint(x, y);
-        var item = el && el.closest
-            ? el.closest('.rb-w-chip, .rb-row, .rb-w-ms-item-v, .rb-w-ms-item')
-            : null;
+        var item = el && el.closest ? el.closest(SELECTOR) : null;
         if (!item) { if (current) { hide(); } return; }
         if (item === current) { return; }
         show(item);
     }
 
     window.__shiriPointerAt = pointerAt;
-    window.__shiriPointerLeave = hide;
+    window.__shiriPointerLeave = function () { lastX = -1; lastY = -1; hide(); };
 
-    document.addEventListener('mousemove', function (e) {
-        pointerAt(e.clientX, e.clientY);
-    }, { passive: true });
+    // 点击 / 失焦时清理，不参与常规 hover 路径
+    document.addEventListener('mousedown', hide);
+    window.addEventListener('blur', function () { lastX = -1; lastY = -1; hide(); });
 })();
