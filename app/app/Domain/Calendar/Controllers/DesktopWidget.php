@@ -101,29 +101,54 @@ class DesktopWidget extends Controller
                 continue;
             }
 
-            $day = $this->toUserDay($event['dateFrom'] ?? '');
-            if ($day === null) {
+            $startDay = $this->toUserDay($event['dateFrom'] ?? '');
+            if ($startDay === null) {
                 continue;
             }
 
-            $dots[$day] = ($dots[$day] ?? 0) + 1;
+            // 跨天日程要在区间里**每一天**都出现，而不是只在开始日。
+            // 结束日缺省或早于开始日时按单天处理（dateTo 是包含式：15 号到 15 号就是一天）。
+            $endDay = $this->toUserDay($event['dateTo'] ?? '') ?? $startDay;
+            if (strcmp($endDay, $startDay) < 0) {
+                $endDay = $startDay;
+            }
+
+            // 只画落进本月窗口的那一段：上个月开始、这个月还在继续的要能接上
+            $rangeStart = max($startDay, $monthStart->format('Y-m-d'));
+            $rangeEnd = min($endDay, $monthEnd->format('Y-m-d'));
+            if (strcmp($rangeStart, $rangeEnd) > 0) {
+                continue;
+            }
 
             $eventTitle = trim(strip_tags((string) ($event['title'] ?? ''))) ?: '未命名日程';
             $eventDesc = trim(preg_replace('/\s+/u', ' ', strip_tags((string) ($event['description'] ?? ''))));
-            $dayItems[$day][] = [
-                'time' => $this->toUserTime($event['dateFrom'] ?? ''),
-                'title' => $eventTitle,
-                'description' => $eventDesc,
-            ];
+            // 时间只标在开始那天，续下去的日期只留标题，否则每天重复一个起始时刻会误读成「每天都 09:30 开始」
+            $startTime = $this->toUserTime($event['dateFrom'] ?? '');
+            $reachesToday = strcmp($todayKey, $rangeStart) >= 0 && strcmp($todayKey, $rangeEnd) <= 0;
 
-            if ($day === $todayKey) {
+            if ($reachesToday) {
                 $todayItems[] = [
                     'id' => 0,
                     'title' => $eventTitle,
-                    'time' => $this->toUserTime($event['dateFrom'] ?? ''),
+                    'time' => $startTime,
                     'description' => $eventDesc,
                     'openBucket' => 'today',
                 ];
+            }
+
+            $cursor = new \DateTimeImmutable($rangeStart);
+            $stop = new \DateTimeImmutable($rangeEnd);
+            while ($cursor <= $stop) {
+                $day = $cursor->format('Y-m-d');
+
+                $dots[$day] = ($dots[$day] ?? 0) + 1;
+                $dayItems[$day][] = [
+                    'time' => $day === $startDay ? $startTime : '',
+                    'title' => $eventTitle,
+                    'description' => $eventDesc,
+                ];
+
+                $cursor = $cursor->modify('+1 day');
             }
         }
 

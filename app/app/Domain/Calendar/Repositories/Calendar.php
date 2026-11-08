@@ -93,11 +93,14 @@ class Calendar extends RepositoryCore
         }
 
         if (! empty($dateFrom)) {
-            $query->where('dateFrom', '>=', $dateFrom->formatDateTimeForDb());
+            // 交集判断，不是包含判断：上个月开始、这个月还在继续的跨月日程也得查出来。
+            // 原来写 dateFrom >= 窗口起点，跨月区间会被整条丢掉。
+            $query->whereRaw('COALESCE(dateTo, dateFrom) >= ?', [$dateFrom->formatDateTimeForDb()]);
         }
 
         if (! empty($dateTo)) {
-            $query->where('dateTo', '<=', $dateTo->formatDateTimeForDb());
+            // 同理：结束时间晚于窗口终点、但开始时间在窗口内的，也要返回
+            $query->where('dateFrom', '<=', $dateTo->formatDateTimeForDb());
         }
 
         $results = $query->orderBy('dateFrom')->get();

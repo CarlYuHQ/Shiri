@@ -592,12 +592,21 @@ class Calendar extends BaseService
             if ($from || $until) {
                 try {
                     $eventStart = dtHelper()->parseDbDateTime($value['dateFrom'] ?? '');
-                    $eventEnd = dtHelper()->parseDbDateTime($value['dateTo'] ?? '');
                 } catch (\Exception $e) {
                     // Invalid stored date — skip this event rather than
                     // killing the feed. SQL audit + cleanup of zero-date
                     // rows is a separate operations task.
                     continue;
+                }
+
+                // 没有结束时间的事件按「和开始同一时刻」算，别让 dateTo 为空把整条丢掉
+                $eventEnd = $eventStart;
+                if (dtHelper()->isValidDateString((string) ($value['dateTo'] ?? ''))) {
+                    try {
+                        $eventEnd = dtHelper()->parseDbDateTime($value['dateTo']);
+                    } catch (\Exception $e) {
+                        // 结束时间坏了就退回开始时间
+                    }
                 }
 
                 if ($from && $eventEnd < $from) {
