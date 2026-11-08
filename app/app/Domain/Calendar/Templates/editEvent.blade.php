@@ -4,6 +4,16 @@
 
 @php
     $values = $values ?? [];
+    // 原生日期控件只认 ISO 的 Y-m-d；数据库里存的是 Y-m-d H:i:s，直接塞进去输入框会空掉
+    $isoDate = static function (?string $value): string {
+        try {
+            $value = (string) $value;
+
+            return dtHelper()->isValidDateString($value) ? dtHelper()->parseDbDateTime($value)->format('Y-m-d') : '';
+        } catch (\Throwable $e) {
+            return '';
+        }
+    };
 @endphp
 
 {!! $tpl->displayNotification() !!}
@@ -19,7 +29,7 @@
     <x-global::forms.text-input id="description" name="description" value="{{ $tpl->escape($values['description']) }}" /><br />
 
     <x-global::forms.label for="dateFrom">{!! __('label.start_date') !!}</x-global::forms.label>
-    <input type="text" id="event_date_from" autocomplete="off" name="dateFrom" value="{{ format($values['dateFrom'])->date() }}" />
+    <input type="date" id="event_date_from" autocomplete="off" name="dateFrom" value="{{ $isoDate($values['dateFrom'] ?? '') }}" />
 
     <div class="par">
         <x-global::forms.label> {!! __('label.start_time') !!}</x-global::forms.label>
@@ -29,7 +39,7 @@
     </div>
 
     <x-global::forms.label for="dateTo">{!! __('label.end_date') !!}</x-global::forms.label>
-    <input type="text" id="event_date_to" autocomplete="off" name="dateTo" value="{{ format($values['dateTo'])->date() }}" />
+    <input type="date" id="event_date_to" autocomplete="off" name="dateTo" value="{{ $isoDate($values['dateTo'] ?? '') }}" />
 
     <div class="par">
         <x-global::forms.label for="">{!! __('label.end_time') !!} </x-global::forms.label>
@@ -62,8 +72,14 @@
 @once
 @push('scripts')
 <script type="text/javascript">
+    // 日期输入已换成原生 type=date，不再挂 jQuery UI datepicker
     jQuery(document).ready(function() {
-        shiri.calendarController.initEventDatepickers();
+        var from = document.getElementById('event_date_from');
+        var to = document.getElementById('event_date_to');
+        if (!from || !to) { return; }
+        to.addEventListener('change', function() {
+            if (from.value && to.value && to.value < from.value) { to.value = from.value; }
+        });
     });
 </script>
 @endpush

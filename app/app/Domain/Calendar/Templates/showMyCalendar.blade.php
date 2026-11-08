@@ -6,6 +6,26 @@
     // The calendar's last view (saved by the view select via Api.Api.setSubmenuState).
     $myCalendarView = app(\Shiri\Core\UI\UiState::class)->get('myCalendarView', 'dayGridMonth');
     $t = static fn (string $k): string => \Shiri\Domain\Calendar\Support\Lang::t($k);
+
+    // FullCalendar 的 end 是排他的（不含当天）。全天事件/长程计划如果直接把结束日当 end，
+    // 15→17 的区间只会画到 16，最后一天凭空消失。这里对全天事件把结束日 +1 天再交给 FC；
+    // 带具体时刻的事件 end 就是真实结束时间，不动。返回 0 表示没有有效结束日期。
+    $eventEndTs = static function (array $event): int {
+        $raw = (string) ($event['dateTo'] ?? '');
+        if ($raw === '') {
+            return 0;
+        }
+        try {
+            $end = dtHelper()->parseDbDateTime($raw);
+            if (! empty($event['allDay'])) {
+                $end = $end->startOfDay()->addDay();
+            }
+
+            return (int) $end->getTimestampMs();
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    };
 @endphp
 
 <x-global::layout.page-header icon="fa {{ $tpl->getModulePicture() }}" :eyebrow="__('headline.calendar')">
@@ -160,13 +180,14 @@
 
     var events = {events: [
         @foreach ($calendar as $calendarEvent)
+        @php $endTs = $eventEndTs($calendarEvent); @endphp
         {
             title: {!! json_encode($calendarEvent['title']) !!},
             description: {!! json_encode($calendarEvent['description'] ?? '') !!},
 
             start: new Date({{ format($calendarEvent['dateFrom'])->jsTimestamp() }}),
-            @if (isset($calendarEvent['dateTo']))
-            end: new Date({{ format($calendarEvent['dateTo'])->jsTimestamp() }}),
+            @if ($endTs > 0)
+            end: new Date({{ $endTs }}),
             @endif
             @if (isset($calendarEvent['allDay']) && $calendarEvent['allDay'] === true)
             allDay: true,

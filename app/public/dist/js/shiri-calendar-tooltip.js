@@ -28,9 +28,20 @@
     }
 
     function timeLine(ev, lang, isEn) {
-        if (ev.allDay) { return lang['cal.allDay'] || (isEn ? 'All day' : '全天'); }
-
         var s = ev.start, e = ev.end;
+        var allDayText = lang['cal.allDay'] || (isEn ? 'All day' : '全天');
+
+        if (ev.allDay) {
+            // 全天事件只写「全天」等于没说：长程计划（跨好几天）看不出区间。
+            // 日历里的 end 是排他的（为了画满最后一天才 +1 天），展示时先减回来。
+            if (!s) { return allDayText; }
+            var last = e ? new Date(e.getTime() - 86400000) : null;
+            if (!last || last.toDateString() === s.toDateString()) {
+                return md(s, isEn) + ' · ' + allDayText;
+            }
+            return md(s, isEn) + ' – ' + md(last, isEn) + ' · ' + allDayText;
+        }
+
         if (!s) { return ''; }
 
         if (!e || s.toDateString() === e.toDateString()) {

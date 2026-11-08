@@ -575,6 +575,12 @@ class Calendar extends BaseService
         foreach ($dbUserEvents as $value) {
             $allDay = filter_var($value['allDay'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
 
+            // 日期残缺的事件直接跳过：早期新建事件的日期控件点不开，存进来的是 NULL，
+            // 交给前端会渲染成 1970 年的幽灵条目。没有开始日期就等于没有可用区间。
+            if (! dtHelper()->isValidDateString((string) ($value['dateFrom'] ?? ''))) {
+                continue;
+            }
+
             // Filter events by date range if specified. Use dtHelper()
             // rather than CarbonImmutable::parse directly so the
             // existing isValidDateString() guard catches MySQL zero-date

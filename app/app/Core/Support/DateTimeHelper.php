@@ -99,6 +99,35 @@ class DateTimeHelper extends CarbonImmutable
             );
         }
 
+        // 浏览器原生日期控件（<input type="date">）提交的是 ISO 的 Y-m-d，和用户的日期设置无关。
+        // 这类值按用户格式解析必然失败，回退到标准格式时 'Y-m-d' 分支直接取正午，
+        // 用户选的时间会被丢掉。所以先把 ISO 日期 + 时间直接组合出来。
+        // 时间可能是 24 小时制（09:30）也可能是本地化 12 小时制（09:30 上午 / 9:30 AM）；
+        // 用 createFromFormat + 'A' 解析本地化午别会失败（中文午别不是 AM/PM），
+        // 因此只取数字部分，再按午别补 12 小时，结果与语言设置无关。
+        $isoDate = trim($userDate);
+        $trimmedTime = trim((string) $userTime);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $isoDate)
+            && preg_match('/^(\d{1,2}):(\d{2})/', $trimmedTime, $timeParts)
+        ) {
+            $hour = (int) $timeParts[1];
+            $minute = (int) $timeParts[2];
+            if (preg_match('/下午|晚上|pm/i', $trimmedTime) && $hour < 12) {
+                $hour += 12;
+            } elseif (preg_match('/上午|凌晨|早上|am/i', $trimmedTime) && $hour === 12) {
+                $hour = 0;
+            }
+
+            try {
+                $this->datetime = CarbonImmutable::createFromFormat('!Y-m-d', $isoDate, $this->userTimezone)
+                    ->setTime($hour, $minute);
+
+                return $this->datetime;
+            } catch (\Exception $e) {
+                // 日期本体不合法：落回下面的原有解析，不在这里抛错
+            }
+        }
+
         try {
 
             // If no standard format worked, handle user format cases
