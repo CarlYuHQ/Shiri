@@ -32,7 +32,7 @@
                         @endforeach
                     @elseif(empty($calendar['managedByPlugin']))
                         {{-- Default iCal calendar actions --}}
-                        <a href="{{ BASE_URL }}/calendar/editExternal/{{ $calendar['id'] }}" class="formModal" data-tippy-content="{{ __('label.edit') }}">
+                        <a href="#/calendar/editExternal/{{ $calendar['id'] }}" class="formModal" data-tippy-content="{{ __('label.edit') }}">
                             <i class="fa fa-pen"></i>
                         </a>
                         &nbsp;

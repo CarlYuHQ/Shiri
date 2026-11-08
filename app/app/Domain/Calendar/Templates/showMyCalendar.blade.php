@@ -62,14 +62,14 @@
 
             </ul>
             <hr />
-            <a href="{{ BASE_URL }}/calendar/connectCalendar" class="formModal" style="display:block; margin-bottom:8px; margin-left:-5px;"><i class="fa-regular fa-calendar-plus" style="width:16px;"></i> {!! __('label.connect_calendar') !!}</a>
-            <a href="{{ BASE_URL }}/calendar/calendarSettings" class="formModal" style="margin-left:-5px;"><i class="fa fa-cog" style="width:16px;"></i> {!! __('label.calendar_settings') !!}</a>
+            <a href="#/calendar/connectCalendar" class="formModal" style="display:block; margin-bottom:8px; margin-left:-5px;"><i class="fa-regular fa-calendar-plus" style="width:16px;"></i> {!! __('label.connect_calendar') !!}</a>
+            <a href="#/calendar/calendarSettings" class="formModal" style="margin-left:-5px;"><i class="fa fa-cog" style="width:16px;"></i> {!! __('label.calendar_settings') !!}</a>
         </x-slot:left>
         {{-- One toolbar row: the two outer groups share the free space, so the title stays centred
              and the view controls stay on one line. --}}
         <div class="calendarToolbar tw-flex tw-flex-wrap tw-items-center tw-gap-sm tw-mb-m">
             <div class="tw-flex-1">
-                <x-global::forms.button tag="a" link="{{ BASE_URL }}/calendar/addEvent" contentRole="primary" class="formModal"><i class='fa fa-plus'></i> {!! __('buttons.add_event') !!}</x-global::forms.button>
+                <x-global::forms.button tag="a" link="#/calendar/addEvent" contentRole="primary" class="formModal"><i class='fa fa-plus'></i> {!! __('buttons.add_event') !!}</x-global::forms.button>
             </div>
             <div class="fc-center center" id="calendarTitle">
                 <h2>..</h2>

@@ -50,7 +50,7 @@ shiri.projectsController = (function () {
                 afterShowCont: function () {
                     jQuery(".showDialogOnLoad").show();
                     initDates();
-                    jQuery(".duplicateProjectModal, .formModal").nyroModal(regularModelConfig);
+                    jQuery(".duplicateProjectModal, .formModal").not('[href^="#"]').nyroModal(regularModelConfig);
                 },
                 beforeClose: function () {
                     location.reload();

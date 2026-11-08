@@ -268,7 +268,8 @@ shiri.calendarController = (function () {
             callbacks: {
                 afterShowCont: function () {
 
-                    jQuery(".formModal").nyroModal(exportModalConfig);
+                    // 同 modals.js：`#/` 链接交给 hash 路由，否则 nyroModal 会把它当选择器去请求当前页
+                    jQuery(".formModal").not('[href^="#"]').nyroModal(exportModalConfig);
                 },
                 beforeClose: function () {
                     location.reload();
