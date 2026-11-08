@@ -165,6 +165,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.delegate = self
         window.isReleasedWhenClosed = false
 
+        // NSWindow 默认 acceptsMouseMovedEvents = false：窗口不是 key 时系统不送
+        // mouseMoved，WKWebView 就不会派发 DOM 的 mouseover，悬浮详情卡因此
+        // 「必须先点一下窗口才出现」。让窗口无论是否激活都接收鼠标移动事件。
+        window.acceptsMouseMovedEvents = true
+
         // 位置自己记（UserDefaults），不用 setFrameAutosaveName：
         // 浮层模式会把窗口改成很小的尺寸，自动保存会把它当成「上次的大窗口尺寸」记下来，
         // 下次普通模式启动就只剩 900×600 的最小尺寸。
@@ -331,6 +336,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.level = kDesktopWidgetLevel
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.isMovableByWindowBackground = true
+        // 浮层永远不是 key window，这条是悬浮能生效的前提
+        window.acceptsMouseMovedEvents = true
         // 整窗 alpha 会连文字一起变淡，糊成一片；不透明度交给页面里的
         // --rb-card-alpha（只影响玻璃底）。这里恒为 1。
         window.alphaValue = 1
