@@ -702,6 +702,16 @@ class Calendar extends BaseService
                         $allDay = true;
                     }
 
+                    // 计划时间段与截止日是同一天时不再画第二条：
+                    // 每条待办已经按 dateToFinish 画过「❕截止」，同日再画一条
+                    // 「已计划编辑」纯属重复（例行计划以前就是这么填的）。
+                    // 两条日期错开时（用户拖拽排期过）仍然保留。
+                    if (dtHelper()->isValidDateString($ticket['dateToFinish'])
+                        && $dateFrom->format('Y-m-d') === dtHelper()->parseDbDateTime($ticket['dateToFinish'])->format('Y-m-d')
+                    ) {
+                        continue;
+                    }
+
                     $context = $this->language->__('label.planned_edit');
 
                     $newValues[] = $this->mapEventData(

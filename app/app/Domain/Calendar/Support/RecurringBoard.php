@@ -279,8 +279,10 @@ class RecurringBoard
             'hourRemaining' => '',
             'planHours' => '',
             'acceptanceCriteria' => '',
-            'editFrom' => $due,
-            'editTo' => $due,
+            // 不填 editFrom/editTo：上游日历对每条待办按「截止日」和「计划时间段」
+            // 两个口径各画一条，两个字段填同一天就是一格两条重复
+            'editFrom' => null,
+            'editTo' => null,
             'milestoneid' => '',
             'dependingTicketId' => '',
             'sortIndex' => '',
