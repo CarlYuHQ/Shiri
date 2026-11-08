@@ -83,6 +83,12 @@
     window.__shiriPointerAt = pointerAt;
     window.__shiriPointerLeave = function () { lastX = -1; lastY = -1; hide(); };
 
+    // App 在前台时 WKWebView 会正常派发 mouseover：作为原生坐标注入之外的
+    // 第二条输入。统一走 pointerAt，不单独 hide/show，不会造成多路径抖动。
+    document.addEventListener('mouseover', function (e) {
+        pointerAt(e.clientX, e.clientY);
+    }, { passive: true });
+
     // 点击 / 失焦时清理，不参与常规 hover 路径
     document.addEventListener('mousedown', hide);
     window.addEventListener('blur', function () { lastX = -1; lastY = -1; hide(); });

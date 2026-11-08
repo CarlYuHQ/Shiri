@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hoverTimer: Timer?
     private var hoverInside = false
     private var lastHoverPoint: NSPoint?
-    private var hoverJSBusy = false
+    private var lastHoverPushAt = Date.distantPast
     private var dragMouseStart: NSPoint = .zero
     private var dragWindowStart: NSPoint = .zero
 
@@ -505,24 +505,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 鼠标没动就别再打 JS 桥：透明浮层每次 evaluateJavaScript 都会触发一次
-        // 内容重绘，20Hz 空转会让窗口看起来在抖。同时保证同一时刻只有一个调用在飞。
-        guard !hoverJSBusy else { return }
+        // 内容重绘，20Hz 空转会让窗口看起来在抖。
+        // 节流用「时间戳」而不是「上一次调用的回调」：回调一旦丢失（页面导航、
+        // WebProcess 忙）单飞闸门会永久卡住，症状就是只有第一次悬浮有效。
+        let now = Date()
+        guard now.timeIntervalSince(lastHoverPushAt) >= 0.05 else { return }
         if let last = lastHoverPoint,
            abs(last.x - screenPoint.x) < 1, abs(last.y - screenPoint.y) < 1 { return }
-        lastHoverPoint = screenPoint
-        hoverInside = true
 
         let inWindow = window.convertPoint(fromScreen: screenPoint)
         let p = webView.convert(inWindow, from: nil)
         guard p.x >= 0, p.y >= 0, p.x <= webView.bounds.width, p.y <= webView.bounds.height else { return }
 
+        // 只有真正发起注入才更新去重基准，避免上面的 guard 提前吃掉一帧
+        lastHoverPoint = screenPoint
+        lastHoverPushAt = now
+        hoverInside = true
+
         // AppKit 坐标原点在左下，DOM 在左上
         let x = p.x
         let y = webView.bounds.height - p.y
-        hoverJSBusy = true
         webView.evaluateJavaScript(
             String(format: "window.__shiriPointerAt && window.__shiriPointerAt(%.1f, %.1f)", x, y)
-        ) { [weak self] _, _ in self?.hoverJSBusy = false }
+        ) { _, _ in }
     }
 
     // MARK: 加载
