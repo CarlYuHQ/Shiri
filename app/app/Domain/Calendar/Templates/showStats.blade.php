@@ -80,7 +80,7 @@
         </dl>
         @if ($stats['oldestOpen'])
             <p class="rb-hint">
-                {{ $t('stats.oldest') }}<a class="formModal" href="#/tickets/showTicket/{{ $stats['oldestOpen']['id'] }}">{{ $stats['oldestOpen']['title'] }}</a>
+                {{ $t('stats.oldest') }}<a class="formModal" href="{{ BASE_URL }}/tickets/showTicket/{{ $stats['oldestOpen']['id'] }}">{{ $stats['oldestOpen']['title'] }}</a>
                 <span class="rb-muted">（{{ $stats['oldestOpen']['dueLabel'] }}）</span>
             </p>
         @endif
