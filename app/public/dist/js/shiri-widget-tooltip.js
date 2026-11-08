@@ -86,4 +86,23 @@
     document.addEventListener('mousedown', hide);
     window.addEventListener('blur', hide);
     window.addEventListener('scroll', hide, true);
+
+    // 浮层是 nonactivatingPanel，永远不会成为 key window：原生层把鼠标坐标
+    // 推过来后自己命中测试，不依赖 WebKit 的 hover 状态机。
+    function pointerAt(x, y) {
+        var el = document.elementFromPoint(x, y);
+        var item = el && el.closest
+            ? el.closest('.rb-w-chip, .rb-row, .rb-w-ms-item-v, .rb-w-ms-item')
+            : null;
+        if (!item) { if (current) { hide(); } return; }
+        if (item === current) { return; }
+        show(item);
+    }
+
+    window.__shiriPointerAt = pointerAt;
+    window.__shiriPointerLeave = hide;
+
+    document.addEventListener('mousemove', function (e) {
+        pointerAt(e.clientX, e.clientY);
+    }, { passive: true });
 })();

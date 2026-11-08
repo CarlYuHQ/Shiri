@@ -86,6 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isWidgetMode = false
     private var normalFrame: NSRect?
     private var dragMonitors: [Any] = []
+    /// App 不在前台时 WKWebView 不派发 DOM hover；定时读全局鼠标坐标注入页面
+    private var hoverTimer: Timer?
+    private var hoverInside = false
     private var dragMouseStart: NSPoint = .zero
     private var dragWindowStart: NSPoint = .zero
 
@@ -242,6 +245,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusLabel.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 14),
         ])
         window.contentView!.addSubview(overlay)
+
+        // App 不在前台 / 窗口不是 key 时，WebKit 不维护 hover 状态：mouseover
+        // 不派发、光标也不变手型，悬浮详情卡就变成「必须先点一下、再等一会」。
+        // 事件监听（含 tracking area）在这种情况下都不可靠，直接定时读全局
+        // 鼠标坐标 NSEvent.mouseLocation，换算成 DOM 坐标后注入页面命中测试。
+        hoverTimer = Timer.scheduledTimer(timeInterval: 0.05, target: self,
+                                          selector: #selector(pollHoverTick),
+                                          userInfo: nil, repeats: true)
     }
 
     // MARK: 桌面浮层
@@ -468,6 +479,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         zoomMenuItem?.isEnabled = !isWidgetMode
         // 不透明度只对桌面浮层有意义（主窗口是不透明窗口）
         opacityMenuItems.forEach { $0.isEnabled = isWidgetMode }
+    }
+
+    // MARK: 悬浮坐标注入
+
+    @objc private func pollHoverTick() { pollHover() }
+
+    private func pollHover() {
+        guard window.isVisible, !webView.isHidden else { return }
+
+        let screenPoint = NSEvent.mouseLocation      // 全局屏幕坐标，左下原点
+        let frame = window.frame
+        let inside = screenPoint.x >= frame.minX && screenPoint.x <= frame.maxX
+                  && screenPoint.y >= frame.minY && screenPoint.y <= frame.maxY
+
+        if !inside {
+            if hoverInside {
+                hoverInside = false
+                webView.evaluateJavaScript("window.__shiriPointerLeave && window.__shiriPointerLeave()") { _, _ in }
+            }
+            return
+        }
+        hoverInside = true
+
+        let inWindow = window.convertPoint(fromScreen: screenPoint)
+        let p = webView.convert(inWindow, from: nil)
+        guard p.x >= 0, p.y >= 0, p.x <= webView.bounds.width, p.y <= webView.bounds.height else { return }
+
+        // AppKit 坐标原点在左下，DOM 在左上
+        let x = p.x
+        let y = webView.bounds.height - p.y
+        webView.evaluateJavaScript(
+            String(format: "window.__shiriPointerAt && window.__shiriPointerAt(%.1f, %.1f)", x, y)
+        ) { _, _ in }
     }
 
     // MARK: 加载

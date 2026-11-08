@@ -92,12 +92,12 @@
     // 兜底：不依赖 FullCalendar 的 eventMouseEnter 回调。直接从 DOM 读标题 / 时间，
     // 描述按标题从页面注入的事件数组里查。冒泡到 document 时 FullCalendar 的回调
     // 通常已经画过完整卡片了，那种情况下不要重复绘制。
-    function descFor(title) {
+    function eventByTitle(title) {
         var list = (window.events && window.events.events) || [];
         for (var i = 0; i < list.length; i++) {
-            if (list[i].title === title) { return list[i].description || ''; }
+            if (list[i].title === title) { return list[i]; }
         }
-        return '';
+        return null;
     }
 
     function showFromDom(el) {
@@ -105,13 +105,16 @@
         var timeEl = el.querySelector('.fc-event-time');
         var title = titleEl ? titleEl.textContent.trim() : (el.textContent || '').trim();
         if (!title) { return; }
+        // 优先用页面注入的原始事件对象：能给出完整日期时间，而不只是格子上那截 HH:MM
+        var src = eventByTitle(title);
         show({
             title: title,
-            allDay: false,
-            start: null,
+            allDay: src ? !!src.allDay : false,
+            start: src ? (src.start || null) : null,
+            end: src ? (src.end || null) : null,
             extendedProps: {
-                description: descFor(title),
-                whenText: timeEl ? timeEl.textContent.trim() : ''
+                description: src ? (src.description || '') : '',
+                whenText: src ? '' : (timeEl ? timeEl.textContent.trim() : '')
             }
         }, el);
     }
@@ -132,4 +135,28 @@
     });
 
     document.addEventListener('mousedown', hide);
+
+    // 原生层注入：App 不在前台 / 窗口不是 key 时，WebKit 不维护 hover 状态，
+    // mouseover 不派发、光标也不变手型。由 NSTrackingArea(.activeAlways)
+    // 把鼠标坐标推过来，这里用 elementFromPoint 主动命中，不等 hover 状态机。
+    function pointerAt(x, y) {
+        var el = document.elementFromPoint(x, y);
+        var item = el && el.closest ? el.closest('.fc-event') : null;
+        if (!item) {
+            if (currentEl) { currentEl = null; hide(); }
+            return;
+        }
+        if (item === currentEl) { return; }
+        if (item === lastShowEl && tip && tip.classList.contains('is-on')) { return; }
+        currentEl = item;
+        showFromDom(item);
+    }
+
+    window.__shiriPointerAt = pointerAt;
+    window.__shiriPointerLeave = function () { currentEl = null; hide(); };
+
+    // 只要 mousemove 到得了就立即响应，不必等原生注入那一跳
+    document.addEventListener('mousemove', function (e) {
+        pointerAt(e.clientX, e.clientY);
+    }, { passive: true });
 })();
