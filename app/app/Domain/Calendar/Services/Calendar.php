@@ -640,8 +640,6 @@ class Calendar extends BaseService
 
                 if (dtHelper()->isValidDateString($ticket['dateToFinish'])) {
 
-                    $context = '❕ '.$this->language->__('label.due_todo');
-
                     $dueDate = dtHelper()->parseDbDateTime($ticket['dateToFinish']);
                     if ($from || $until) {
 
@@ -659,8 +657,10 @@ class Calendar extends BaseService
                     $isEndOfDay = $dueDate->format('H:i:s') === '23:59:59';
                     $allDay = $isEndOfDay;
 
+                    // 标题直接用待办自己的名字：加「即将到期的待办」「已计划编辑」
+                    // 这类前缀只会把真正的内容挤没（格子宽度有限）
                     $newValues[] = $this->mapEventData(
-                        title: $context.$ticket['headline'].' ('.$statusName.')',
+                        title: $ticket['headline'],
                         description: $ticket['description'],
                         allDay: $allDay,
                         id: $ticket['id'],
@@ -712,10 +712,8 @@ class Calendar extends BaseService
                         continue;
                     }
 
-                    $context = $this->language->__('label.planned_edit');
-
                     $newValues[] = $this->mapEventData(
-                        title: $context.$ticket['headline'].' ('.$statusName.')',
+                        title: $ticket['headline'],
                         description: $ticket['description'],
                         allDay: $allDay,
                         id: $ticket['id'],

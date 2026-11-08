@@ -61,7 +61,7 @@
                             {{-- 大卡：直接把当天的事写进格子（窄屏由 CSS 换成下面那排圆点） --}}
                             <span class="rb-w-chips">
                                 @foreach ($day['items'] as $item)
-                                    <em class="rb-w-chip">
+                                    <em class="rb-w-chip" title="{{ trim($item['time'].' '.$item['title']) }}">
                                         @if ($item['time'] !== '')
                                             <b>{{ $item['time'] }}</b>
                                         @endif
@@ -114,7 +114,8 @@
                 @foreach ($todayItems as $item)
                     @if ($item['id'] > 0)
                         <li class="rb-row" data-id="{{ $item['id'] }}" data-bucket="today"
-                            data-open-bucket="{{ $item['openBucket'] }}" data-done="0">
+                            data-open-bucket="{{ $item['openBucket'] }}" data-done="0"
+                            title="{{ trim($item['time'].' '.$item['title']) }}">
                             <button class="rb-check" type="button" role="checkbox"
                                     aria-checked="false" aria-label="{{ $lt['markDone'] }}"></button>
                             <span class="rb-row-title">{{ $item['title'] }}</span>
@@ -123,7 +124,7 @@
                             @endif
                         </li>
                     @else
-                        <li class="rb-row is-event">
+                        <li class="rb-row is-event" title="{{ trim($item['time'].' '.$item['title']) }}">
                             <span class="rb-evdot"></span>
                             <span class="rb-row-title">{{ $item['title'] }}</span>
                             @if ($item['time'] !== '')

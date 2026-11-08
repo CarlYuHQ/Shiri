@@ -158,6 +158,47 @@
     background: rgba(0, 0, 0, .022);
 }
 
+/* ── 5. 悬浮详情卡（showMyCalendar.blade.php 里的 __fcTipShow） ────────── */
+.fc-tip {
+    background: #221c19;
+    border-radius: 9px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+    box-sizing: border-box;
+    color: #fff;
+    display: none;
+    font-size: 12.5px;
+    line-height: 1.5;
+    max-width: 300px;
+    padding: 10px 12px;
+    pointer-events: none;
+    position: fixed;
+    z-index: 9999;
+}
+
+.fc-tip.is-on {
+    display: block;
+}
+
+.fc-tip-title {
+    font-weight: 600;
+}
+
+.fc-tip-when {
+    color: rgba(255, 255, 255, .72);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+}
+
+.fc-tip-desc {
+    border-top: 1px solid rgba(255, 255, 255, .16);
+    color: rgba(255, 255, 255, .85);
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+    padding-top: 6px;
+    white-space: pre-wrap;
+}
+
 /* 上下月的日期淡一些，不再和本月抢注意力 */
 #calendar .fc-day-other .fc-daygrid-day-number {
     opacity: .35;

@@ -162,6 +162,7 @@
         @foreach ($calendar as $calendarEvent)
         {
             title: {!! json_encode($calendarEvent['title']) !!},
+            description: {!! json_encode($calendarEvent['description'] ?? '') !!},
 
             start: new Date({{ format($calendarEvent['dateFrom'])->jsTimestamp() }}),
             @if (isset($calendarEvent['dateTo']))
@@ -350,7 +351,14 @@
                     }
 
                 },
-                eventMouseEnter: function() {
+                eventMouseEnter: function (info) {
+                    window.__fcTipShow(info.event, info.el);
+                },
+                eventMouseLeave: function () {
+                    window.__fcTipHide();
+                },
+                eventDragStart: function () {
+                    window.__fcTipHide();
                 },
 
             }
@@ -432,6 +440,8 @@
 <script src="{{ BASE_URL }}/dist/js/shiri-quickadd.js?v={{ $ltV('/dist/js/shiri-quickadd.js') }}"></script>
 {{-- 右侧栏：添加 / 删除节点 --}}
 <script src="{{ BASE_URL }}/dist/js/shiri-milestones.js?v={{ $ltV('/dist/js/shiri-milestones.js') }}"></script>
+{{-- 日历条目悬浮详情卡：完整标题 / 时间 / 描述（独立文件，避免嵌进主脚本被截断） --}}
+<script src="{{ BASE_URL }}/dist/js/shiri-calendar-tooltip.js?v={{ $ltV('/dist/js/shiri-calendar-tooltip.js') }}"></script>
 @endpush
 
 @endsection
