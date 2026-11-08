@@ -123,15 +123,17 @@
 
     function pointerAt(x, y) {
         // 同坐标不重复命中：静止时原生层已停止注入，这里再挡一层
-        if (x === lastX && y === lastY) { return; }
+        if (x === lastX && y === lastY) { return 'dup'; }
         lastX = x; lastY = y;
 
         var el = document.elementFromPoint(x, y);
         var item = el && el.closest ? el.closest('.fc-event') : null;
-        if (!item) { if (currentEl) { hide(); } return; }
-        if (item === currentEl) { return; }
+        if (!item) { if (currentEl) { hide(); } return 'null@' + (el ? el.className : '-'); }
+        if (item === currentEl) { return 'same'; }
         currentEl = item;
         showFromDom(item);
+        var tt = item.querySelector('.fc-event-title');
+        return 'hit:' + ((tt && tt.textContent) || '');
     }
 
     window.__shiriPointerAt = pointerAt;

@@ -70,14 +70,15 @@
 
     function pointerAt(x, y) {
         // 同坐标不重复命中：静止时原生层已停止注入，这里再挡一层
-        if (x === lastX && y === lastY) { return; }
+        if (x === lastX && y === lastY) { return 'dup'; }
         lastX = x; lastY = y;
 
         var el = document.elementFromPoint(x, y);
         var item = el && el.closest ? el.closest(SELECTOR) : null;
-        if (!item) { if (current) { hide(); } return; }
-        if (item === current) { return; }
+        if (!item) { if (current) { hide(); } return 'null@' + (el ? el.className : '-'); }
+        if (item === current) { return 'same'; }
         show(item);
+        return 'hit:' + ((item.getAttribute('title') || '').trim());
     }
 
     window.__shiriPointerAt = pointerAt;

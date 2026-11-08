@@ -522,12 +522,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastHoverPushAt = now
         hoverInside = true
 
-        // AppKit 坐标原点在左下，DOM 在左上
+        // WKWebView 是 flipped 坐标系（原点在左上），convert 出来的 y 已经是
+        // 「距内容顶部」的像素，正是 DOM 需要的坐标，不能再拿 bounds.height 减一次。
+        // 之前多减了一次，y 被垂直镜像：鼠标在第二行、页面收到第五行，
+        // 表现为只有某个位置（15 日附近）碰巧命中自己。
         let x = p.x
-        let y = webView.bounds.height - p.y
+        let y = p.y
         webView.evaluateJavaScript(
             String(format: "window.__shiriPointerAt && window.__shiriPointerAt(%.1f, %.1f)", x, y)
-        ) { _, _ in }
+        ) { [weak self] result, error in
+            guard let self, UserDefaults.standard.bool(forKey: "hoverDebug") else { return }
+            let hit = (result as? String) ?? (error != nil ? "ERR:\(error!.localizedDescription)" : "nil")
+            self.appendHoverLog("screen=(\(Int(screenPoint.x)),\(Int(screenPoint.y))) dom=(\(Int(x)),\(Int(y))) -> \(hit)")
+        }
+    }
+
+    private func appendHoverLog(_ line: String) {
+        let path = "/tmp/shiri-hover.log"
+        let data = (line + "\n").data(using: .utf8) ?? Data()
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            fh.closeFile()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
     }
 
     // MARK: 加载
