@@ -522,18 +522,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastHoverPushAt = now
         hoverInside = true
 
-        // WKWebView 是 flipped 坐标系（原点在左上），convert 出来的 y 已经是
-        // 「距内容顶部」的像素，正是 DOM 需要的坐标，不能再拿 bounds.height 减一次。
-        // 之前多减了一次，y 被垂直镜像：鼠标在第二行、页面收到第五行，
-        // 表现为只有某个位置（15 日附近）碰巧命中自己。
-        let x = p.x
-        let y = p.y
+        // convert 出来的是「相对 webView 顶部」的点；DOM 的 y 要再减掉视口顶部被
+        // 遮挡的高度（主窗口的标题栏），并按页面缩放折算成 CSS 像素。
+        // 少减这一下，注入点会比光标低 32px —— 鼠标得放在条目上方一格才命中。
+        let scale = viewportScale > 0 ? viewportScale : 1
+        let x = p.x / scale
+        let y = max(0, p.y - viewportInsetTop) / scale
+        let debug = UserDefaults.standard.bool(forKey: "hoverDebug")
+        if debug {
+            appendHoverLog("SEND screen=(\(Int(screenPoint.x)),\(Int(screenPoint.y))) dom=(\(Int(x)),\(Int(y)))"
+                + " inset=\(Int(viewportInsetTop)) active=\(NSApp.isActive)")
+        }
         webView.evaluateJavaScript(
             String(format: "window.__shiriPointerAt && window.__shiriPointerAt(%.1f, %.1f)", x, y)
         ) { [weak self] result, error in
             guard let self, UserDefaults.standard.bool(forKey: "hoverDebug") else { return }
             let hit = (result as? String) ?? (error != nil ? "ERR:\(error!.localizedDescription)" : "nil")
-            self.appendHoverLog("screen=(\(Int(screenPoint.x)),\(Int(screenPoint.y))) dom=(\(Int(x)),\(Int(y))) -> \(hit)")
+            self.appendHoverLog("GOT  \(hit)")
+            self.logGeometryOnce()
+        }
+    }
+
+    /// 一次性打印坐标系关键量：window 与 web 的关系、safeArea、以及页面的 innerWidth/Height。
+    /// webView 顶部是否与 window 顶部重合、WebKit 有没有给标题栏留「遮挡内缩」，
+    /// 决定注入坐标要不要再减一个偏移。
+    private var geometryLogged = false
+    private func logGeometryOnce() {
+        guard !geometryLogged else { return }
+        geometryLogged = true
+        webView.evaluateJavaScript("[window.innerWidth, window.innerHeight, window.devicePixelRatio].join(',')") { [weak self] r, _ in
+            guard let self else { return }
+            let js = (r as? String) ?? "-"
+            let frame = self.window.frame
+            let cb = self.webView.bounds.size
+            self.appendHoverLog(
+                "DIAG mode=\(self.isWidgetMode ? "widget" : "window") frame=\(Int(frame.width))x\(Int(frame.height))"
+                + " web=\(Int(cb.width))x\(Int(cb.height))"
+                + " safeTop=\(Int(self.webView.safeAreaInsets.top))"
+                + " viewportScale=\(self.viewportScale) viewportInsetTop=\(self.viewportInsetTop)"
+                + " webInWindow=\(self.webView.convert(self.webView.bounds, to: nil))"
+                + " js(w,h,dpr)=\(js)"
+            )
+        }
+    }
+
+    // MARK: 视口换算
+    //
+    // 主窗口是 .fullSizeContentView：webView 顶部与窗口顶部重合（webInWindow 原点为
+    // (0,0)），但 WebKit 会把 DOM 视口整体下移一个「被标题栏遮挡」的高度抵消掉
+    // ——实测窗口 1320×860、safeAreaInsets.top=32、window.innerHeight=828。
+    // 于是 webView 的 y 比 DOM 的 y 多算了 32px：注入后页面往下多看一格，
+    // 表现为「鼠标要放在条目上方 32px 处（通常是日期那一行）浮窗才出现」。
+    // 这里在页面加载完成后量一次视口尺寸，换算成缩放比例与顶部偏移，注入前校正。
+    // 浮层是 borderless（视口高度 == webView 高度），量出来偏移就是 0，天然正确。
+
+    private var viewportScale: CGFloat = 1
+    private var viewportInsetTop: CGFloat = 0
+
+    private func measureViewport() {
+        let size = webView.bounds.size
+        webView.evaluateJavaScript("[window.innerWidth, window.innerHeight].join(',')") { [weak self] result, _ in
+            guard let self, let raw = result as? String else { return }
+            let parts = raw.split(separator: ",").compactMap { Double($0) }
+            guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return }
+            let scale = size.width / CGFloat(parts[0])
+            guard scale > 0 else { return }
+            self.viewportScale = scale
+            // 视口高度换成 webView 的点之后，与 webView 高度之差即顶部被遮挡的高度
+            let inset = size.height - CGFloat(parts[1]) * scale
+            self.viewportInsetTop = max(0, min(inset, 120))
+            if UserDefaults.standard.bool(forKey: "hoverDebug") {
+                self.appendHoverLog("VIEWPORT web=\(Int(size.width))x\(Int(size.height))"
+                    + " js=(\(raw)) scale=\(scale) inset=\(inset) -> used \(self.viewportInsetTop)")
+            }
         }
     }
 
@@ -718,6 +779,8 @@ extension AppDelegate: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         retries = 0
         hideOverlay()
+        // 页面换了（主窗口 / 浮层 / 尺寸变化）就重量一次视口，悬浮注入靠它换算坐标
+        measureViewport()
         if let title = webView.title, !title.isEmpty, title != kAppTitle {
             window.title = "\(title) — \(kAppTitle)"
         } else {
@@ -904,6 +967,8 @@ extension AppDelegate: NSWindowDelegate {
     func windowDidEndLiveResize(_ notification: Notification) {
         persistFrame()
         persistNormalFrame()
+        // 视口高度变了，悬浮注入的坐标换算基准要跟着重量一次
+        measureViewport()
     }
 
     func windowDidMove(_ notification: Notification) {
