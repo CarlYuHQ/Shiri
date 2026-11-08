@@ -3,6 +3,8 @@
    独立文件加载：不要嵌进页面的主 <script> 里，内层 </script> 会提前截断外层脚本。 */
 (function () {
     var tip = null;
+    var lastShowEl = null;
+    var currentEl = null;
 
     function ensure() {
         if (!tip) {
@@ -51,7 +53,7 @@
         title.textContent = ev.title || '';
         t.appendChild(title);
 
-        var when = timeLine(ev, lang, isEn);
+        var when = (ev.extendedProps && ev.extendedProps.whenText) || timeLine(ev, lang, isEn);
         if (when) {
             var line = document.createElement('div');
             line.className = 'fc-tip-when';
@@ -76,12 +78,58 @@
         if (top < 8) { top = r.bottom + 8; }
         t.style.left = left + 'px';
         t.style.top = top + 'px';
+        lastShowEl = el;
     }
 
     function hide() {
+        currentEl = null;
         if (tip) { tip.classList.remove('is-on'); }
     }
 
     window.__fcTipShow = show;
     window.__fcTipHide = hide;
+
+    // 兜底：不依赖 FullCalendar 的 eventMouseEnter 回调。直接从 DOM 读标题 / 时间，
+    // 描述按标题从页面注入的事件数组里查。冒泡到 document 时 FullCalendar 的回调
+    // 通常已经画过完整卡片了，那种情况下不要重复绘制。
+    function descFor(title) {
+        var list = (window.events && window.events.events) || [];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].title === title) { return list[i].description || ''; }
+        }
+        return '';
+    }
+
+    function showFromDom(el) {
+        var titleEl = el.querySelector('.fc-event-title');
+        var timeEl = el.querySelector('.fc-event-time');
+        var title = titleEl ? titleEl.textContent.trim() : (el.textContent || '').trim();
+        if (!title) { return; }
+        show({
+            title: title,
+            allDay: false,
+            start: null,
+            extendedProps: {
+                description: descFor(title),
+                whenText: timeEl ? timeEl.textContent.trim() : ''
+            }
+        }, el);
+    }
+
+    document.addEventListener('mouseover', function (e) {
+        var el = e.target && e.target.closest ? e.target.closest('.fc-event') : null;
+        if (!el || el === currentEl) { return; }
+        if (el === lastShowEl && tip && tip.classList.contains('is-on')) { return; }
+        currentEl = el;
+        showFromDom(el);
+    });
+
+    document.addEventListener('mouseout', function (e) {
+        var el = e.target && e.target.closest ? e.target.closest('.fc-event') : null;
+        if (!el) { return; }
+        if (e.relatedTarget && el.contains(e.relatedTarget)) { return; }
+        hide();
+    });
+
+    document.addEventListener('mousedown', hide);
 })();

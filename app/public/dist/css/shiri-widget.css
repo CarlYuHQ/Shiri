@@ -708,3 +708,47 @@ body.rb-widget-body {
 .rb-w-more:hover {
     color: var(--lt-text);
 }
+
+/* 悬浮详情卡：非激活面板不会弹原生 title tooltip，这里自己画一张。
+   固定在视口上、不吃鼠标事件，避免挡住条目的点击与勾选。 */
+.rb-w-tip {
+    background: rgba(34, 28, 25, .94);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+    box-sizing: border-box;
+    color: #fff;
+    display: none;
+    font-size: 13px;
+    line-height: 1.5;
+    max-width: 280px;
+    min-width: 140px;
+    padding: 10px 12px;
+    pointer-events: none;
+    position: fixed;
+    z-index: 99999;
+}
+
+.rb-w-tip.is-on {
+    display: block;
+}
+
+.rb-w-tip-title {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.rb-w-tip-when {
+    color: rgba(255, 255, 255, .72);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+}
+
+.rb-w-tip-desc {
+    border-top: 1px solid rgba(255, 255, 255, .16);
+    color: rgba(255, 255, 255, .85);
+    margin-top: 6px;
+    overflow-wrap: anywhere;
+    padding-top: 6px;
+    white-space: pre-wrap;
+}

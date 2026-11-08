@@ -6,6 +6,14 @@
 
 @section('content')
 
+@php
+    // 资源版本用文件 mtime：改完悬浮卡脚本立刻生效，不用手动改 ?v=
+    $tipV = static function (string $p): int {
+        $f = APP_ROOT.'/public'.$p;
+        return is_file($f) ? (int) filemtime($f) : 1;
+    };
+@endphp
+
 <div class="rb-widget" data-theme="{{ $theme }}" data-theme-mode="{{ $themeMode }}"
      style="--rb-card-alpha: {{ number_format($cardAlpha, 2, '.', '') }}"
      data-project-id="{{ $defaultProjectId }}">
@@ -61,7 +69,7 @@
                             {{-- 大卡：直接把当天的事写进格子（窄屏由 CSS 换成下面那排圆点） --}}
                             <span class="rb-w-chips">
                                 @foreach ($day['items'] as $item)
-                                    <em class="rb-w-chip" title="{{ trim($item['time'].' '.$item['title']) }}">
+                                    <em class="rb-w-chip" title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
                                         @if ($item['time'] !== '')
                                             <b>{{ $item['time'] }}</b>
                                         @endif
@@ -115,7 +123,7 @@
                     @if ($item['id'] > 0)
                         <li class="rb-row" data-id="{{ $item['id'] }}" data-bucket="today"
                             data-open-bucket="{{ $item['openBucket'] }}" data-done="0"
-                            title="{{ trim($item['time'].' '.$item['title']) }}">
+                            title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
                             <button class="rb-check" type="button" role="checkbox"
                                     aria-checked="false" aria-label="{{ $lt['markDone'] }}"></button>
                             <span class="rb-row-title">{{ $item['title'] }}</span>
@@ -124,7 +132,7 @@
                             @endif
                         </li>
                     @else
-                        <li class="rb-row is-event" title="{{ trim($item['time'].' '.$item['title']) }}">
+                        <li class="rb-row is-event" title="{{ trim($item['time'].' '.$item['title']) }}" data-tip-desc="{{ $item['description'] ?? '' }}">
                             <span class="rb-evdot"></span>
                             <span class="rb-row-title">{{ $item['title'] }}</span>
                             @if ($item['time'] !== '')
@@ -185,4 +193,6 @@
 
 </div>
 
+{{-- 悬浮详情卡：非激活面板不会弹原生 title tooltip，这里自己画一张卡片 --}}
+<script src="{{ BASE_URL }}/dist/js/shiri-widget-tooltip.js?v={{ $tipV('/dist/js/shiri-widget-tooltip.js') }}"></script>
 @endsection

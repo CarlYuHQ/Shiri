@@ -81,6 +81,8 @@ class TodoBoard
             $todos[] = [
                 'id' => (int) ($row['id'] ?? 0),
                 'title' => $this->cleanTitle($row['headline'] ?? ''),
+                // 桌面浮层的悬浮详情卡要显示待办正文；富文本描述先去标签再压空白
+                'description' => trim(preg_replace('/\s+/u', ' ', strip_tags((string) ($row['description'] ?? '')))),
                 'projectId' => $projectId,
                 'statusLabel' => $statusTitle,
                 'statusColor' => $statusColor,

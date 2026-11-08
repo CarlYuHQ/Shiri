@@ -75,6 +75,7 @@ class DesktopWidget extends Controller
             $dayItems[$todo['dueDay']][] = [
                 'time' => $todo['hasTime'] ? $todo['due']->format('H:i') : '',
                 'title' => $todo['title'],
+                'description' => $todo['description'],
             ];
 
             if ($todo['today']) {
@@ -82,6 +83,7 @@ class DesktopWidget extends Controller
                     'id' => $todo['id'],
                     'title' => $todo['title'],
                     'time' => $todo['hasTime'] ? $todo['due']->format('H:i') : '',
+                    'description' => $todo['description'],
                     'openBucket' => $todo['openBucket'],
                 ];
             }
@@ -107,16 +109,19 @@ class DesktopWidget extends Controller
             $dots[$day] = ($dots[$day] ?? 0) + 1;
 
             $eventTitle = trim(strip_tags((string) ($event['title'] ?? ''))) ?: '未命名日程';
+            $eventDesc = trim(preg_replace('/\s+/u', ' ', strip_tags((string) ($event['description'] ?? ''))));
             $dayItems[$day][] = [
                 'time' => $this->toUserTime($event['dateFrom'] ?? ''),
                 'title' => $eventTitle,
+                'description' => $eventDesc,
             ];
 
             if ($day === $todayKey) {
                 $todayItems[] = [
                     'id' => 0,
-                    'title' => trim(strip_tags((string) ($event['title'] ?? ''))) ?: '未命名日程',
+                    'title' => $eventTitle,
                     'time' => $this->toUserTime($event['dateFrom'] ?? ''),
+                    'description' => $eventDesc,
                     'openBucket' => 'today',
                 ];
             }
