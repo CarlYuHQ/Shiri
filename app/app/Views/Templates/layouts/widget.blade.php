@@ -22,5 +22,39 @@
     {{-- 文案字典交给脚本（Lang::flat()）：JS 里不再各写一份中文字符串 --}}
     <script>window.RB_LANG = {!! json_encode(\Shiri\Domain\Calendar\Support\Lang::flat(), JSON_UNESCAPED_UNICODE) !!};</script>
     <script src="{{ BASE_URL }}/dist/js/shiri-board.js?v={{ $ltV('/dist/js/shiri-board.js') }}"></script>
+    <script>
+        // 卡片上的「今天」、今天的日程、本月网格全是服务端渲染的，页面开着不动就永远停在
+        // 打开那天（实测：前一天下午开机，第二天上午卡片上还是「今天 · 11月8日 周日」）。
+        // 跨天（含睡眠醒来跨天）就整页重载一次。
+        //
+        // 日期用「渲染时的用户时区偏移」算，不用浏览器本地时区：万一系统时区和
+        // Shiri 里的时区设置不一致，前者会天天对不上，那就变成每 30 秒重载一次的死循环。
+        (function () {
+            var card = document.querySelector('.rb-widget');
+            if (!card || !card.dataset.today) {
+                return;
+            }
+
+            var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+            var offset = parseInt(card.dataset.tzOffset || '0', 10);
+
+            var userDate = function () {
+                var d = new Date(Date.now() + offset * 1000);
+                return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate());
+            };
+
+            var check = function () {
+                if (userDate() !== card.dataset.today) {
+                    location.reload();
+                }
+            };
+
+            setInterval(check, 30000);
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) { check(); }
+            });
+            window.addEventListener('focus', check);
+        })();
+    </script>
 </body>
 </html>

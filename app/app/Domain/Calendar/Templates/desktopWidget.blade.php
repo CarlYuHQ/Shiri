@@ -16,6 +16,10 @@
 
 <div class="rb-widget" data-theme="{{ $theme }}" data-theme-mode="{{ $themeMode }}"
      style="--rb-card-alpha: {{ number_format($cardAlpha, 2, '.', '') }}"
+     {{-- 这一页的「今天」是服务端渲染出来的，不会自己翻页。把渲染时的日期和
+          用户时区偏移存下来，脚本据此判断是否已经跨天（见 widget 布局里的脚本）。 --}}
+     data-today="{{ $today->format('Y-m-d') }}"
+     data-tz-offset="{{ $today->getOffset() }}"
      data-project-id="{{ $defaultProjectId }}">
 
     <header class="rb-w-head">
