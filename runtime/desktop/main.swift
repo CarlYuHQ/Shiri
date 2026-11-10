@@ -91,6 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hoverInside = false
     private var lastHoverPoint: NSPoint?
     private var lastHoverPushAt = Date.distantPast
+    /// 遮挡判定的节流缓存：鼠标不动时也要能感知「有窗口滑到卡片上方」
+    private var lastOcclusionAt = Date.distantPast
+    private var lastOcclusionPoint = NSPoint(x: -1_000_000, y: -1_000_000)
+    private var lastOcclusionHit = false
     private var dragMouseStart: NSPoint = .zero
     private var dragWindowStart: NSPoint = .zero
 
@@ -487,6 +491,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func pollHoverTick() { pollHover() }
 
+    /// 让页面收起详情框：鼠标真的离开卡片，或者卡片被别的窗口盖住，都走这里。
+    private func releaseHover() {
+        guard hoverInside else { return }
+        hoverInside = false
+        lastHoverPoint = nil
+        webView.evaluateJavaScript("window.__shiriPointerLeave && window.__shiriPointerLeave()") { _, _ in }
+    }
+
+    /// 屏幕点是否被「别的窗口」盖住。
+    ///
+    /// 走 `NSWindow.windowNumber(at:belowWindowWithWindowNumber:)`：窗口服务器直接
+    /// 回答「这一点最前面的是哪个窗口」，跨 App 有效，而且**不需要录屏权限**
+    /// （`CGWindowListCopyWindowInfo` 在没有录屏授权时只会返回本 App 的窗口，
+    /// 拿它判遮挡会永远判成「没被挡」，等于没修）。
+    /// 返回 0 表示该点没有任何窗口，按未遮挡处理——宁可保留悬浮，也不要整块失灵。
+    private func hoverObscured(at screenPoint: NSPoint) -> Bool {
+        let now = Date()
+        let moved = abs(screenPoint.x - lastOcclusionPoint.x) >= 1
+                 || abs(screenPoint.y - lastOcclusionPoint.y) >= 1
+        // 鼠标不动时 100ms 查一次即可：窗口滑到卡片上方也还能跟上
+        if !moved, now.timeIntervalSince(lastOcclusionAt) < 0.1 { return lastOcclusionHit }
+
+        lastOcclusionAt = now
+        lastOcclusionPoint = screenPoint
+        lastOcclusionHit = computeObscured(at: screenPoint)
+        if UserDefaults.standard.bool(forKey: "hoverDebug") {
+            appendHoverLog("OCCLU \(lastOcclusionHit ? "covered" : "clear")"
+                + " screen=(\(Int(screenPoint.x)),\(Int(screenPoint.y)))")
+        }
+        return lastOcclusionHit
+    }
+
+    private func computeObscured(at screenPoint: NSPoint) -> Bool {
+        let top = NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0)
+        guard top != 0 else { return false }
+        return top != window.windowNumber
+    }
+
     private func pollHover() {
         guard window.isVisible, !webView.isHidden else { return }
 
@@ -496,11 +538,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   && screenPoint.y >= frame.minY && screenPoint.y <= frame.maxY
 
         if !inside {
-            if hoverInside {
-                hoverInside = false
-                lastHoverPoint = nil
-                webView.evaluateJavaScript("window.__shiriPointerLeave && window.__shiriPointerLeave()") { _, _ in }
-            }
+            releaseHover()
+            return
+        }
+
+        // 别的 App 的窗口压在小卡上面时，全局坐标依旧落在小卡矩形里。
+        // 只看坐标就会「鼠标在别人的窗口上，底下的卡片却弹出详情框」——
+        // 小卡本来就在窗口下层，视觉上已经被盖住了，这种情况按离开处理。
+        if hoverObscured(at: screenPoint) {
+            releaseHover()
             return
         }
 
