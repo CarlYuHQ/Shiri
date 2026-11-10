@@ -100,13 +100,14 @@
 #calendar .shiri-ev-purple { --ev: #6a3d9a; }
 #calendar .shiri-ev-teal { --ev: #0f7b6c; }
 
-/* 在待办页勾掉的日程：日历上划掉并压暗，两处口径一致（不删数据） */
+/* 已完成的条目（在待办页勾掉的日程、状态为「完成」的待办）：日历上划掉并压暗。
+   两页口径一致，且都不删数据——完成不等于删除。 */
 #calendar .shiri-ev-done {
     opacity: .5;
 }
 
-#calendar .shiri-ev-done .fc-event-title,
-#calendar .shiri-ev-done.fc-daygrid-dot-event {
+/* 只划标题：连圆点和时间一起划掉反而看不清，完成状态靠压暗就够明显了 */
+#calendar .shiri-ev-done .fc-event-title {
     text-decoration: line-through;
 }
 

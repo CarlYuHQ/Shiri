@@ -733,6 +733,12 @@ class Calendar extends BaseService
                     $statusColor = 'var(--grey)';
                 }
 
+                // 已完成的待办在日历上也要划掉：待办清单页里它躺在「已完成」，
+                // 日历上却和没做的一样，两页就对不上了。statusType 为 DONE 的
+                // 就是完成态（含已归档 -1）。
+                $ticketStatusType = (string) ($statusLabelsArray[$ticket['projectId']][$ticket['status']]['statusType'] ?? '');
+                $ticketClasses = $ticketStatusType === 'DONE' ? ['shiri-ev-done'] : [];
+
                 $backgroundColor = 'var(--accent2)';
 
                 if (dtHelper()->isValidDateString($ticket['dateToFinish'])) {
@@ -767,7 +773,8 @@ class Calendar extends BaseService
                         backgroundColor: $backgroundColor,
                         borderColor: $statusColor,
                         dateFrom: $ticket['dateToFinish'],
-                        dateTo: $ticket['dateToFinish']
+                        dateTo: $ticket['dateToFinish'],
+                        classNames: $ticketClasses
                     );
                 }
 
@@ -820,7 +827,8 @@ class Calendar extends BaseService
                         backgroundColor: $backgroundColor,
                         borderColor: $statusColor,
                         dateFrom: $ticket['editFrom'],
-                        dateTo: $hasValidEditTo ? $ticket['editTo'] : $ticket['editFrom']
+                        dateTo: $hasValidEditTo ? $ticket['editTo'] : $ticket['editFrom'],
+                        classNames: $ticketClasses
                     );
                 }
             }
@@ -1109,7 +1117,8 @@ class Calendar extends BaseService
         ?string $backgroundColor,
         ?string $borderColor,
         ?string $dateFrom,
-        ?string $dateTo
+        ?string $dateTo,
+        array $classNames = []
     ): array {
         // Ticket records in MySQL can legitimately have NULL for any of
         // the user-facing optional fields here (description, dates, colours)
@@ -1133,6 +1142,7 @@ class Calendar extends BaseService
             'dateContext' => $dateContext,
             'backgroundColor' => $backgroundColor ?? '',
             'borderColor' => $borderColor ?? '',
+            'classNames' => $classNames,
             'url' => BASE_URL.'/dashboard/home/#/tickets/showTicket/'.($id ?? 0),
         ];
     }

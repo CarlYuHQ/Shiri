@@ -195,13 +195,16 @@
             allDay: false,
             @endif
             enitityId: {{ $calendarEvent['id'] }},
+            {{-- classNames 两种条目都要带上（原先只写在事件分支里，导致已完成的待办
+                 在日历上不会被划掉）：
+                 · 只有时间没有区间的条目会被渲染成 dot event，不吃 backgroundColor，
+                   只能靠 class 让 CSS 上色（.shiri-ev-<颜色> 在 shiri-calendar.css 里）；
+                 · shiri-ev-done 表示这条已经完成。 --}}
+            classNames: {!! json_encode($calendarEvent['classNames'] ?? []) !!},
             @if (isset($calendarEvent['eventType']) && $calendarEvent['eventType'] == 'calendar')
             url: '{{ CURRENT_URL }}#/calendar/editEvent/{{ $calendarEvent['id'] }}',
             backgroundColor: '{{ $calendarEvent['backgroundColor'] ?? 'var(--accent2)' }}',
             borderColor: '{{ $calendarEvent['borderColor'] ?? 'var(--accent2)' }}',
-            {{-- 只有时间没有区间的条目会被渲染成 dot event，不吃 backgroundColor，
-                 只能靠 class 让 CSS 上色（.shiri-ev-<颜色> 在 shiri-calendar.css 里） --}}
-            classNames: {!! json_encode($calendarEvent['classNames'] ?? []) !!},
             enitityType: "event",
             dateContext: '{{ $calendarEvent['dateContext'] ?? 'plan' }}',
             @else
