@@ -450,6 +450,8 @@
 <link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-calendar.css?v={{ $ltV('/dist/css/shiri-calendar.css') }}">
 {{-- 右侧「重要时间节点」栏 --}}
 <link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-milestones.css?v={{ $ltV('/dist/css/shiri-milestones.css') }}">
+{{-- 事件弹窗里的控件（色板）——待办页也会开同一个弹窗，所以单独成文件 --}}
+<link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-modal.css?v={{ $ltV('/dist/css/shiri-modal.css') }}">
 @endpush
 
 @push('scripts')

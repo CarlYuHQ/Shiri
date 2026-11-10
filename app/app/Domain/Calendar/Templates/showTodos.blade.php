@@ -70,6 +70,8 @@
     };
 @endphp
 <link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-board.css?v={{ $ltV('/dist/css/shiri-board.css') }}">
+{{-- 点日程标题会在这个页面弹出事件编辑框，控件样式得跟着来 --}}
+<link rel="stylesheet" href="{{ BASE_URL }}/dist/css/shiri-modal.css?v={{ $ltV('/dist/css/shiri-modal.css') }}">
 @endpush
 
 @push('scripts')

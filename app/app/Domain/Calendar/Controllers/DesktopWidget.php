@@ -101,6 +101,11 @@ class DesktopWidget extends Controller
                 continue;
             }
 
+            // 在待办页勾掉的日程不再算进「今天要做的事」，也不算打点（和已完成 ticket 一致）
+            if (! empty($event['done'])) {
+                continue;
+            }
+
             $startDay = $this->toUserDay($event['dateFrom'] ?? '');
             if ($startDay === null) {
                 continue;

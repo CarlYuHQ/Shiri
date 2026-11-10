@@ -42,15 +42,20 @@
     }
 
     // ── RPC ────────────────────────────────────────────────────────────────
-    function apiUrl() {
+    /** 站点根地址（不带末尾斜杠），JSON-RPC 和日历自己的 POST 端点都从这里拼 */
+    function baseUrl() {
         var explicit = document.body && document.body.dataset ? document.body.dataset.api : '';
         if (explicit) {
-            return explicit;
+            return String(explicit).replace(/\/api\/jsonrpc\/?$/, '').replace(/\/+$/, '');
         }
         if (window.shiri && window.shiri.appUrl) {
-            return String(window.shiri.appUrl).replace(/\/+$/, '') + '/api/jsonrpc';
+            return String(window.shiri.appUrl).replace(/\/+$/, '');
         }
-        return location.origin + '/api/jsonrpc';
+        return location.origin;
+    }
+
+    function apiUrl() {
+        return baseUrl() + '/api/jsonrpc';
     }
 
     var nextId = 1;
@@ -235,6 +240,29 @@
         }
     }
 
+    /**
+     * 日程的勾选不走 JSON-RPC：zp_calendar 不是 ticket，官方那套接口够不到它。
+     * 走日历自己的 /calendar/toggleEventDone，只改 done，不删数据。
+     */
+    function toggleEvent(id, done) {
+        return fetch(baseUrl() + '/calendar/toggleEventDone', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: 'id=' + encodeURIComponent(id) + '&done=' + (done ? '1' : '0')
+        }).then(function (res) {
+            return res.json();
+        }).then(function (payload) {
+            if (!payload || payload.ok !== true) {
+                throw new Error(T('err.rejected', '服务端拒绝修改'));
+            }
+            return true;
+        });
+    }
+
     function toggleRow(row) {
         var id = parseInt(row.dataset.id, 10);
         if (!id || row.classList.contains('is-busy')) {
@@ -242,12 +270,18 @@
         }
 
         var wasDone = row.dataset.done === '1';
+        // 清单里混着 ticket 和日程两种来源，接口不同
+        var isEvent = row.dataset.source === 'event';
         row.classList.add('is-busy');
 
-        rpc(wasDone ? 'Tickets.Tickets.markTicketReopen' : 'Tickets.Tickets.markTicketDone', { id: id })
+        var request = isEvent
+            ? toggleEvent(id, !wasDone)
+            : rpc(wasDone ? 'Tickets.Tickets.markTicketReopen' : 'Tickets.Tickets.markTicketDone', { id: id });
+
+        request
             .then(function (ok) {
                 row.classList.remove('is-busy');
-                if (ok === false) {
+                if (!isEvent && ok === false) {
                     throw new Error(T('err.rejected', '服务端拒绝修改'));
                 }
                 moveRow(row, !wasDone);
@@ -264,6 +298,7 @@
         var li = document.createElement('li');
         li.className = 'rb-row';
         li.dataset.id = id;
+        li.dataset.source = 'ticket';
         li.dataset.done = '0';
 
         var bucket = bucketFor(day);
@@ -288,7 +323,13 @@
         due.className = 'rb-row-due';
         due.textContent = dueLabel(day);
 
+        // 和服务端渲染的行保持同一个结构：勾选圈 → 颜色点占位 → 标题 → 截止
+        var dot = document.createElement('span');
+        dot.className = 'rb-evdot';
+        dot.setAttribute('aria-hidden', 'true');
+
         li.appendChild(check);
+        li.appendChild(dot);
         li.appendChild(link);
         li.appendChild(due);
 

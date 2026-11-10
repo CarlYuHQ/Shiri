@@ -1,0 +1,52 @@
+/*
+ * 「拾日」弹窗里的小控件
+ * ---------------------------------------------------------------------------
+ * 事件的新增 / 编辑弹窗在**两个页面**都会被打开：日历页（点格子）和待办清单页
+ * （点日程标题）。样式只挂在其中一个页面就会在另一个页面掉样式——色板会从
+ * 「一排色点」退化成「一竖排裸 radio」。所以单独成文件，两处都加载。
+ */
+
+/* ── 事件颜色选择 ────────────────────────────────────────────────────────
+   一排色点，点谁选谁。radio 本身透明铺在色点上，键盘也能用方向键切换。 */
+.lt-swatches {
+    align-items: center;
+    display: flex;
+    gap: 9px;
+    margin: 4px 0 14px;
+}
+
+.lt-swatch {
+    cursor: pointer;
+    display: inline-flex;
+    height: 22px;
+    position: relative;
+    width: 22px;
+}
+
+.lt-swatch input {
+    appearance: none;
+    border: 0;
+    cursor: pointer;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    position: absolute;
+}
+
+.lt-swatch i {
+    background: var(--swatch);
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .14);
+    display: block;
+    height: 22px;
+    pointer-events: none;
+    width: 22px;
+}
+
+.lt-swatch input:checked + i {
+    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px rgba(0, 0, 0, .38);
+}
+
+.lt-swatch input:focus-visible + i {
+    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px var(--lt-text, #333);
+}

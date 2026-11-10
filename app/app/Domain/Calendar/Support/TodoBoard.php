@@ -7,13 +7,16 @@ use Shiri\Domain\Tickets\Services\Tickets as TicketService;
 /**
  * 「拾日」的待办数据层。
  *
- * Shiri 的待办其实就是分配给当前用户的 ticket（zp_tickets，带 dateToFinish）。
- * 官方的数据出口是 TicketService::getOpenUserTicketsThisWeekAndLater()，它已经把
- * 待办按 overdue / thisWeek / later 分好桶并按截止日排序，但不给状态类型、不给
- * 「是否已完成」的判断，也不给适合直接展示的文案。
+ * 两处数据最终都会变成待办：
+ *   1. ticket（zp_tickets，带 dateToFinish）—— 官方待办本体；
+ *   2. 手记的日程（zp_calendar，带 dateFrom..dateTo）—— 由 {@see EventBoard} 提供。
+ * 官方出口 TicketService::getOpenUserTicketsThisWeekAndLater() 已经把 ticket 按
+ * overdue / thisWeek / later 分好桶并按截止日排序，但不给状态类型、不给「是否已完成」
+ * 的判断，也不给适合直接展示的文案。
  *
- * 本类是唯一一处把这些原始行整理成页面可用结构的地方：待办清单页、统计页、
- * 桌面浮层小卡三处共用，避免三份几乎一样的取数逻辑各写一遍。
+ * 待办清单页要的是「所有还没做的事」，所以读 {@see self::items()}（ticket + 日程）；
+ * 桌面小卡和统计页读 {@see self::todos()}（只有 ticket）——那两处已经各自把日程
+ * 摊平算过一遍了，再合并会重复计数。
  */
 class TodoBoard
 {
@@ -22,8 +25,29 @@ class TodoBoard
 
     public function __construct(
         private TicketService $tickets,
-        private RecurringBoard $recurring
+        private RecurringBoard $recurring,
+        private EventBoard $events
     ) {}
+
+    /**
+     * 待办清单页用的完整清单：ticket + 手记的日程，混在一起按截止排好序。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function items(int $userId): array
+    {
+        $rows = $this->todos($userId);
+
+        if ($userId > 0) {
+            foreach ($this->eventRows($userId) as $row) {
+                $rows[] = $row;
+            }
+        }
+
+        $this->sortRows($rows);
+
+        return $rows;
+    }
 
     /**
      * 当前用户的全部待办（含已完成），已按「未完成在前 → 截止日早的在前 → 无截止日垫底」
@@ -80,6 +104,8 @@ class TodoBoard
 
             $todos[] = [
                 'id' => (int) ($row['id'] ?? 0),
+                // 清单里混着 ticket 和日程两种来源，前端勾选要按这个分发到不同接口
+                'source' => 'ticket',
                 'title' => $this->cleanTitle($row['headline'] ?? ''),
                 // 桌面浮层的悬浮详情卡要显示待办正文；富文本描述先去标签再压空白
                 'description' => trim(preg_replace('/\s+/u', ' ', strip_tags((string) ($row['description'] ?? '')))),
@@ -115,6 +141,95 @@ class TodoBoard
             ];
         }
 
+        $this->sortRows($todos);
+
+        return $todos;
+    }
+
+    /**
+     * 把 zp_calendar 的日程摊成待办行。
+     *
+     * 与 ticket 的差别只有两点：
+     *  - 截止取**结束**那天：跨天任务在它还在进行时不该算逾期；
+     *  - 没有 projectId / 状态色，勾选走 /calendar/toggleEventDone（改 done 列，
+     *    不删数据——日程在日历上还要留着）。
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function eventRows(int $userId): array
+    {
+        $now = dtHelper()->userNow();
+        $todayStart = $now->startOfDay();
+        $weekEnd = $now->endOfWeek(\Carbon\CarbonInterface::SUNDAY)->endOfDay();
+
+        $rows = [];
+        foreach ($this->events->events($userId) as $event) {
+            /** @var \Carbon\CarbonImmutable $start */
+            $start = $event['start'];
+            /** @var \Carbon\CarbonImmutable $end */
+            $end = $event['end'];
+            $isDone = (bool) ($event['done'] ?? false);
+
+            $due = $end;
+            $spansDays = (int) $start->startOfDay()->diffInDays($end->startOfDay());
+
+            $isToday = $due->isSameDay($now);
+            $isOverdue = ! $isDone && $due->lt($todayStart);
+            $isThisWeek = $due->between($todayStart, $weekEnd);
+
+            // 全天日程不显示时刻；跨天的只显示「至 X 日」，免得被误读成每天都有那个点
+            $withTime = ! $event['allDay'] && $spansDays === 0;
+            // 单天日程显示**开始**时刻（人关心的是几点开始），分桶/排序仍按结束时间
+            $labelAt = $spansDays === 0 ? $start : $end;
+
+            $rows[] = [
+                'id' => $event['id'],
+                'source' => 'event',
+                'title' => (string) $event['title'],
+                // 日程没有独立正文：再把标题写一遍只会让悬浮卡重复显示
+                'description' => '',
+                'projectId' => 0,
+                'statusLabel' => '',
+                'statusColor' => '',
+                'done' => $isDone,
+                'overdue' => $isOverdue,
+                'today' => $isToday,
+                'bucket' => match (true) {
+                    $isDone => 'done',
+                    $isOverdue => 'overdue',
+                    $isToday => 'today',
+                    $isThisWeek => 'week',
+                    default => 'later',
+                },
+                'openBucket' => match (true) {
+                    $isOverdue => 'overdue',
+                    $isToday => 'today',
+                    $isThisWeek => 'week',
+                    default => 'later',
+                },
+                'due' => $due,
+                'dueIso' => $due->format('Y-m-d\TH:i'),
+                'dueDay' => $due->format('Y-m-d'),
+                'dueLabel' => $spansDays > 0
+                    ? Lang::t('due.until', ['date' => $this->dayLabel($end, $now)])
+                    : $this->dueLabel($labelAt, $now, $withTime),
+                'hasTime' => $withTime,
+                // 行首的小圆点用日程自己选的颜色，和日历上是同一个色
+                'color' => (string) ($event['color'] ?? ''),
+                'modified' => null,
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * 未完成在前 → 截止早的在前 → 无截止日垫底。
+     *
+     * @param  array<int, array<string, mixed>>  $todos
+     */
+    private function sortRows(array &$todos): void
+    {
         usort($todos, function (array $a, array $b): int {
             // 已完成的沉到最底，再按完成时间新→旧
             if ($a['done'] !== $b['done']) {
@@ -133,8 +248,6 @@ class TodoBoard
             // 都没截止日：新建的在前
             return ($b['id'] ?? 0) <=> ($a['id'] ?? 0);
         });
-
-        return $todos;
     }
 
     /**
@@ -338,22 +451,17 @@ class TodoBoard
 
     /**
      * 人读的截止文案：今天 / 明天 / 昨天 / 3 天前 / 11月25日，需要时带上时间。
+     *
+     * @param  bool  $withTime  false 用于全天日程：库里存着 09:00，但那不是用户填的
      */
-    private function dueLabel(?\Carbon\CarbonImmutable $due, \Carbon\CarbonImmutable $now): string
+    private function dueLabel(?\Carbon\CarbonImmutable $due, \Carbon\CarbonImmutable $now, bool $withTime = true): string
     {
         if ($due === null) {
             return Lang::t('due.none');
         }
 
         $days = (int) $now->startOfDay()->diffInDays($due->startOfDay(), false);
-        $time = $due->format('H:i') === '00:00' ? '' : ' '.$due->format('H:i');
-
-        $date = Lang::isEnglish()
-            ? $due->format('M j')
-            : $due->format('n月j日');
-        $dateYear = Lang::isEnglish()
-            ? $due->format('M j, Y')
-            : $due->format('Y年n月j日');
+        $time = ! $withTime || $due->format('H:i') === '00:00' ? '' : ' '.$due->format('H:i');
 
         return match (true) {
             $days === 0 => Lang::t('due.today').$time,
@@ -361,8 +469,17 @@ class TodoBoard
             $days === 2 => Lang::t('due.dayAfter').$time,
             $days === -1 => Lang::t('due.yesterday').$time,
             $days < -1 && $days > -8 => Lang::t('due.daysAgo', ['n' => abs($days)]),
-            $due->year === $now->year => $date.$time,
-            default => $dateYear.$time,
+            default => $this->dayLabel($due, $now).$time,
         };
+    }
+
+    /** 只有日期，不带「今天 / 明天」这类相对说法 */
+    private function dayLabel(\Carbon\CarbonImmutable $day, \Carbon\CarbonImmutable $now): string
+    {
+        if (Lang::isEnglish()) {
+            return $day->year === $now->year ? $day->format('M j') : $day->format('M j, Y');
+        }
+
+        return $day->year === $now->year ? $day->format('n月j日') : $day->format('Y年n月j日');
     }
 }

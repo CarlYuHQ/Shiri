@@ -161,6 +161,7 @@ class Lang
             'todos.markUndone' => ['zh' => '标记为未完成', 'en' => 'Mark as open'],
             'todos.dueTitle' => ['zh' => '截止日期', 'en' => 'Due date'],
             'todos.emptyHint' => ['zh' => '还没有待办。在日历里点任意一天就能加一条，或者在上面直接记一笔。', 'en' => 'No tasks yet — click any day in the calendar, or type one above.'],
+            'todos.untitledEvent' => ['zh' => '未命名日程', 'en' => 'Untitled event'],
 
             // 报错
             'err.request' => ['zh' => '请求失败', 'en' => 'Request failed'],
@@ -193,6 +194,7 @@ class Lang
             'due.dayAfter' => ['zh' => '后天', 'en' => 'In 2 days'],
             'due.yesterday' => ['zh' => '昨天', 'en' => 'Yesterday'],
             'due.daysAgo' => ['zh' => '{n} 天前', 'en' => '{n} days ago'],
+            'due.until' => ['zh' => '至 {date}', 'en' => 'until {date}'],
             'due.date' => ['zh' => '{m}月{d}日', 'en' => '{mon} {d}'],
             'due.dateYear' => ['zh' => '{y}年{m}月{d}日', 'en' => '{mon} {d}, {y}'],
 

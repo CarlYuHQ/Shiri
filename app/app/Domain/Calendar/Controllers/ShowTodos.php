@@ -12,8 +12,9 @@ use Symfony\Component\HttpFoundation\Response;
 /**
  * 待办清单页 /calendar/showTodos
  *
- * 日历回答「这件事排在哪天」，这一页回答「还有哪些事没做」。两者读的是同一份
- * 数据（分配给自己的 ticket），只是切法不同，取数统一交给 TodoBoard。
+ * 日历回答「这件事排在哪天」，这一页回答「还有哪些事没做」。日历上出现的两种东西
+ * ——ticket 和手记的日程——在这一页都要能勾掉，所以读的是 TodoBoard::items()
+ * （两份合并），而不是只看 ticket 的 todos()。
  */
 class ShowTodos extends Controller
 {
@@ -31,7 +32,7 @@ class ShowTodos extends Controller
         Lang::applyToShiri();
         $userId = (int) session('userdata.id');
 
-        $todos = $this->board->todos($userId);
+        $todos = $this->board->items($userId);
 
         $open = array_values(array_filter($todos, fn ($t) => ! $t['done']));
         $done = array_values(array_filter($todos, fn ($t) => $t['done']));

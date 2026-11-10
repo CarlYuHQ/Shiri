@@ -688,6 +688,7 @@ class Calendar extends BaseService
             $eventToken = (string) ($value['kind'] ?? '');
             $eventHex = self::EVENT_COLORS[$eventToken]['hex'] ?? '';
             $eventColor = $eventHex !== '' ? $eventHex : 'var(--accent1)';
+            $eventDone = (bool) ($value['done'] ?? false);
 
             $newValues[] = [
                 'title' => $value['description'],
@@ -702,9 +703,14 @@ class Calendar extends BaseService
                 'backgroundColor' => $eventColor,
                 'borderColor' => $eventColor,
                 // 只有一个时间的条目（dot event）不吃 backgroundColor，用 class 让 CSS 上色
-                'classNames' => $eventToken !== '' ? ['shiri-ev-'.$eventToken] : [],
+                'classNames' => array_values(array_filter([
+                    $eventToken !== '' ? 'shiri-ev-'.$eventToken : '',
+                    // 在待办页勾掉的日程，日历上也划掉，两边口径一致
+                    $eventDone ? 'shiri-ev-done' : '',
+                ])),
                 // 颜色令牌本身也带出去：桌面浮层的 chip 要用它上色
                 'colorKind' => $eventToken,
+                'done' => $eventDone,
                 'url' => BASE_URL.'/calendar/showMyCalendar/#/calendar/editEvent/'.$value['id'],
             ];
         }

@@ -100,6 +100,16 @@
 #calendar .shiri-ev-purple { --ev: #6a3d9a; }
 #calendar .shiri-ev-teal { --ev: #0f7b6c; }
 
+/* 在待办页勾掉的日程：日历上划掉并压暗，两处口径一致（不删数据） */
+#calendar .shiri-ev-done {
+    opacity: .5;
+}
+
+#calendar .shiri-ev-done .fc-event-title,
+#calendar .shiri-ev-done.fc-daygrid-dot-event {
+    text-decoration: line-through;
+}
+
 #calendar .fc-daygrid-event-dot {
     margin-right: 1px;
     border-width: 3.5px;
@@ -216,47 +226,5 @@
     opacity: .35;
 }
 
-/* ── 事件颜色选择（新增/编辑弹窗） ────────────────────────────────────────
-   一排色点，点谁选谁。radio 本身透明铺在色点上，键盘也能用方向键切换。 */
-.lt-swatches {
-    align-items: center;
-    display: flex;
-    gap: 9px;
-    margin: 4px 0 14px;
-}
-
-.lt-swatch {
-    cursor: pointer;
-    display: inline-flex;
-    height: 22px;
-    position: relative;
-    width: 22px;
-}
-
-.lt-swatch input {
-    appearance: none;
-    border: 0;
-    cursor: pointer;
-    inset: 0;
-    margin: 0;
-    opacity: 0;
-    position: absolute;
-}
-
-.lt-swatch i {
-    background: var(--swatch);
-    border-radius: 50%;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .14);
-    display: block;
-    height: 22px;
-    pointer-events: none;
-    width: 22px;
-}
-
-.lt-swatch input:checked + i {
-    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px rgba(0, 0, 0, .38);
-}
-
-.lt-swatch input:focus-visible + i {
-    box-shadow: 0 0 0 2px var(--lt-bg, #fff), 0 0 0 3.5px var(--lt-text, #333);
-}
+/* 事件颜色选择（.lt-swatches / .lt-swatch）已挪到 shiri-modal.css：
+   待办页也会打开同一个弹窗，只挂在日历页会掉样式。 */
