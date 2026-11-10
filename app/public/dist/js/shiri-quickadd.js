@@ -105,7 +105,10 @@
     function addEvent(id, title, dateStr, allDay, timeStr) {
         var cal = window.shiriCalendar;
         if (cal && typeof cal.addEvent === 'function') {
-            var base = (window.shiri && window.shiri.appUrl ? window.shiri.appUrl : '').replace(/\/$/, '');
+            // 链接格式照抄模板里的 CURRENT_URL#/… ：当前页 + hash，只换 hash 不会整页跳。
+            // 点条目开编辑弹窗、悬停删除按钮（按 href 里的 id 认条目，见
+            // shiri-quickdelete.js）都靠它。
+            var pageBase = location.href.split('#')[0];
 
             cal.addEvent({
                 id: String(id),
@@ -113,9 +116,7 @@
                 start: allDay ? dateStr : dateStr + 'T' + timeStr,
                 end: allDay ? dateStr : dateStr + 'T' + plusHour(timeStr),
                 allDay: !!allDay,
-                // 链接格式必须和服务端给的一致：点条目开编辑弹窗、删除按钮（按 href
-                // 里的 id 认条目，见 shiri-quickdelete.js）都靠它
-                url: base + '/calendar/showMyCalendar/#/calendar/editEvent/' + id,
+                url: pageBase + '#/calendar/editEvent/' + id,
                 // 和服务端给默认色条目的一致：不选颜色就用主题强调色
                 backgroundColor: 'var(--accent1)',
                 borderColor: 'var(--accent1)'
