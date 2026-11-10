@@ -4,8 +4,8 @@
  * 需求：点日历上任意一天就能加事，不用先点「新增事件」再选日期。
  *
  * 交互：点某天的空白处 → 就地弹出一个小输入条 → 写标题 → 回车保存（Esc 取消，点别处关闭）。
- * 保存走 JSON-RPC Calendar.Calendar.addEvent，成功后直接把条目插进对应格子，
- * 不整页刷新；插入的条目带 #/calendar/editEvent/<id> 链接，所以
+ * 保存走 JSON-RPC Calendar.Calendar.addEvent，成功后调用 FullCalendar 的 addEvent()
+ * 把条目挂进它自己的 event store（不整页刷新）。条目带 editEvent 链接，所以
  * shiri-quickdelete.js 会自动给它挂上删除按钮。
  */
 (function () {
@@ -98,7 +98,36 @@
     }
 
     // 保存成功后把条目直接插进格子（不刷新页面）
-    function insertChip(dateStr, id, title, allDay, timeStr) {
+    //
+    // 优先交给 FullCalendar：addEvent() 进的是它自己的 event store，条目由它渲染，
+    // 圆点/时间/标题的排版、配色、时间格式全都和服务器渲染的那些一模一样，切月份
+    // 重绘也不会丢。只有拿不到 calendar 实例时才退化成手搓 DOM（下面那个 fallback）。
+    function addEvent(id, title, dateStr, allDay, timeStr) {
+        var cal = window.shiriCalendar;
+        if (cal && typeof cal.addEvent === 'function') {
+            var base = (window.shiri && window.shiri.appUrl ? window.shiri.appUrl : '').replace(/\/$/, '');
+
+            cal.addEvent({
+                id: String(id),
+                title: title,
+                start: allDay ? dateStr : dateStr + 'T' + timeStr,
+                end: allDay ? dateStr : dateStr + 'T' + plusHour(timeStr),
+                allDay: !!allDay,
+                // 链接格式必须和服务端给的一致：点条目开编辑弹窗、删除按钮（按 href
+                // 里的 id 认条目，见 shiri-quickdelete.js）都靠它
+                url: base + '/calendar/showMyCalendar/#/calendar/editEvent/' + id,
+                // 和服务端给默认色条目的一致：不选颜色就用主题强调色
+                backgroundColor: 'var(--accent1)',
+                borderColor: 'var(--accent1)'
+            });
+
+            return true;
+        }
+
+        return insertChipFallback(dateStr, id, title, allDay, timeStr);
+    }
+
+    function insertChipFallback(dateStr, id, title, allDay, timeStr) {
         var cell = document.querySelector('.fc-daygrid-day[data-date="' + dateStr + '"]');
         if (!cell) {
             return false;
@@ -115,9 +144,9 @@
         a.className = 'fc-event fc-event-draggable fc-event-start fc-event-end ' +
             (allDay ? 'fc-daygrid-event fc-daygrid-block-event fc-h-event' : 'fc-daygrid-event fc-daygrid-dot-event');
         a.setAttribute('href', base + '/calendar/showMyCalendar#/calendar/editEvent/' + id);
-        a.style.display = 'block';
 
         if (allDay) {
+            a.style.display = 'block';
             a.style.backgroundColor = accent;
             a.style.borderColor = accent;
             a.style.color = '#fff';
@@ -125,6 +154,8 @@
                 '<div class="fc-event-title-container"><div class="fc-event-title fc-sticky">' +
                 escapeHtml(title) + '</div></div></div></div>';
         } else {
+            // 不要设 display：.fc-daygrid-dot-event 的 flex 布局就是「圆点 + 时间 + 标题
+            // 排一行」的来源，改成 block 会把三者各撑成一行（只剩圆点和标题两行可见）。
             a.innerHTML = '<div class="fc-daygrid-event-dot" style="border-color:' + accent + '"></div>' +
                 '<div class="fc-event-time">' + escapeHtml(timeStr) + '</div>' +
                 '<div class="fc-event-title">' + escapeHtml(title) + '</div>';
@@ -201,7 +232,7 @@
             window.shiri.rpc('Calendar.Calendar.addEvent', { values: values }).then(function (id) {
                 close();
                 if (id && typeof id === 'number') {
-                    if (!insertChip(dateStr, id, text, allDay, t)) {
+                    if (!addEvent(id, text, dateStr, allDay, t)) {
                         window.location.reload();
                         return;
                     }

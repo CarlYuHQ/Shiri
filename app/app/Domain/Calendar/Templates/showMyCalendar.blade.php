@@ -384,6 +384,11 @@
             );
         calendar.setOption('locale', shiri.i18n.__("language.code"));
         calendar.render();
+        // 快速新建（shiri-quickadd.js）要往日历里塞一条刚保存的事件。让它走
+        // FullCalendar 自己的 event store，而不是手搓一段 DOM：手搓的条目上色、
+        // 排版、时间格式都得自己对着影子抄，抄漏一处就露馅（比如 display:block
+        // 让圆点、时间、标题各占一行），切月份重绘还会把搓出来的节点抹掉。
+        window.shiriCalendar = calendar;
         calendar.scrollToTime( Date.now() );
         jQuery("#calendarTitle h2").text(calendar.getCurrentData().viewTitle);
 
