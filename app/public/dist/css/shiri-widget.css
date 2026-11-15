@@ -52,8 +52,17 @@ body.rb-widget-body {
     --rb-thumb: #221c19;
     --rb-track: rgba(0, 0, 0, .12);
 
-    -webkit-backdrop-filter: blur(26px) saturate(1.7);
-    backdrop-filter: blur(26px) saturate(1.7);
+    /* 这里**故意不用** backdrop-filter。
+     *
+     * 窗口是 isOpaque=false 的透明窗（桌面由窗口服务器合成在窗口**之外**），
+     * 所以 WebKit 根本采不到「窗口背后的桌面」——它采到的是窗口自己的 backing
+     * store，也就是这张卡片本身。于是每次重绘都等于把「已经糊过的自己」再糊
+     * 一遍：鼠标一悬浮（原生层注入坐标 → 命中测试 → 布局刷新 → 整卡重绘），
+     * 卡片就一次比一次糊，鼠标拿开、等一次干净的整屏合成才恢复。
+     * 表现就是「一悬停就模糊，移开过一会才好」。
+     *
+     * 想要真正的背景模糊不能用 CSS，得在 webView 底下垫一个 NSVisualEffectView
+     * （系统合成，只在窗口这一层采样一次），CSS 只负责上层的 alpha 渐变。 */
     background-color: transparent;
     /* 渐变底 + 可调 alpha：两段色都乘上 --rb-card-alpha */
     background-image: linear-gradient(
