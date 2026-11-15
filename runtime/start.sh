@@ -19,9 +19,11 @@ if launchctl print "gui/$U/local.shiri.nginx" >/dev/null 2>&1; then
 else
   echo "模式：手动拉起（未注册 launchd）"
   echo "[1/3] MariaDB..."
-  # 用端口判断是否在跑，而不是看 socket：换 socket 名/换启动方式时不会误判，
-  # 否则会对着已占用的 3306 再拉一个实例，然后报一堆看不懂的错。
-  if (exec 3<>/dev/tcp/127.0.0.1/3306) 2>/dev/null; then
+  # 探活看 pid + socket 文件，不看端口：本机从 2026-11-15 起 127.0.0.1:3306 被
+  # 整机拒连（内核直接回 RST，连接到不了数据库进程），用 /dev/tcp 探会永远判成
+  # 「没在跑」，于是对着已经占着端口的实例再拉一个，报一堆看不懂的错。
+  MDB_PID=$(cat "$RT/run/mariadb.pid" 2>/dev/null || true)
+  if [ -n "$MDB_PID" ] && kill -0 "$MDB_PID" 2>/dev/null && [ -S /tmp/mariadb_shiri.sock ]; then
     echo "      已在运行"
   else
     nohup $M/mariadbd --datadir=/opt/homebrew/var/mysql --port=3306 --bind-address=127.0.0.1 \

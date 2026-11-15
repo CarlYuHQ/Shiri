@@ -581,7 +581,20 @@ return [
                 'database' => env('LEAN_DB_DATABASE', 'laravel'),
                 'username' => env('LEAN_DB_USER', 'root'),
                 'password' => env('LEAN_DB_PASSWORD', ''),
-                'unix_socket' => env('LEAN_DB_SOCKET', ''),
+                'unix_socket' => env('LEAN_DB_SOCKET', (static function () {
+                    // 数据库就在本机时优先走 unix socket（runtime 脚本就是用这个 socket
+                    // 起 MariaDB 的）：少一层协议，而且不会栽在本机网络层的拦截上——
+                    // 2026-11-15 出现过 127.0.0.1:3306 被整机拒连（内核直接回 RST，
+                    // 数据库的 Aborted_connects 始终是 0，连接根本没到进程），
+                    // 同一时刻走 socket 完全正常，整个桌面端就那么白屏了一个 500。
+                    // 连远端库时 LEAN_DB_HOST 不是本机地址，这里返回空，照常走 TCP。
+                    $host = (string) env('LEAN_DB_HOST', '127.0.0.1');
+                    $socket = '/tmp/mariadb_shiri.sock';
+
+                    return in_array($host, ['127.0.0.1', 'localhost', '::1', ''], true) && file_exists($socket)
+                        ? $socket
+                        : '';
+                })()),
                 'charset' => env('LEAN_DB_CHARSET', 'utf8mb4'),
                 'collation' => env('LEAN_DB_COLLATION', 'utf8mb4_unicode_ci'),
                 'prefix' => '',
