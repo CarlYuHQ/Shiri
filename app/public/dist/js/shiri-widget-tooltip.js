@@ -68,9 +68,20 @@
         current = el;
     }
 
+    // 命中测试要跑 elementFromPoint / getBoundingClientRect，会把布局强制刷一遍，
+    // 于是整张卡片重绘一次 —— 透明浮层上每次重绘都要重新采样 backdrop-filter，
+    // 密度一高在视觉上就是「透明度在闪」。光电鼠标静止时仍有 1px 级抖动，
+    // 所以这里按**位移**而不是「坐标是否完全相同」判定：
+    // 没挪够 3px 就不重排布局，悬浮框维持原样（人眼也分辨不出这 3px）。
+    var HIT_MIN_MOVE = 3;
+
     function pointerAt(x, y) {
-        // 同坐标不重复命中：静止时原生层已停止注入，这里再挡一层
-        if (x === lastX && y === lastY) { return 'dup'; }
+        // 位移不足：既不重排布局，也不更新基准点（这样慢速移动能累积）
+        if (lastX >= 0
+            && Math.abs(x - lastX) < HIT_MIN_MOVE
+            && Math.abs(y - lastY) < HIT_MIN_MOVE) {
+            return 'dup';
+        }
         lastX = x; lastY = y;
 
         var el = document.elementFromPoint(x, y);

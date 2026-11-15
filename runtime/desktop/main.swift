@@ -551,13 +551,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 鼠标没动就别再打 JS 桥：透明浮层每次 evaluateJavaScript 都会触发一次
-        // 内容重绘，20Hz 空转会让窗口看起来在抖。
+        // 内容重绘，密度一高整张卡片看起来就在「闪」（玻璃底每帧重采样一次
+        // backdrop-filter，明暗跟着跳）。所以压到 ≈8Hz，并把「没动」的判定
+        // 从 1pt 提到 2.5pt —— 光电鼠标静止时本身就有 1px 级抖动，旧阈值等于
+        // 「鼠标停在小卡上 = 永远 20Hz 重绘」，正是这次闪烁的来源。
         // 节流用「时间戳」而不是「上一次调用的回调」：回调一旦丢失（页面导航、
         // WebProcess 忙）单飞闸门会永久卡住，症状就是只有第一次悬浮有效。
         let now = Date()
-        guard now.timeIntervalSince(lastHoverPushAt) >= 0.05 else { return }
+        guard now.timeIntervalSince(lastHoverPushAt) >= 0.12 else { return }
         if let last = lastHoverPoint,
-           abs(last.x - screenPoint.x) < 1, abs(last.y - screenPoint.y) < 1 { return }
+           abs(last.x - screenPoint.x) < 2.5, abs(last.y - screenPoint.y) < 2.5 { return }
 
         let inWindow = window.convertPoint(fromScreen: screenPoint)
         let p = webView.convert(inWindow, from: nil)
